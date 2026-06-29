@@ -1,0 +1,55 @@
+# ==========================================================
+# Logzilla .gitignore
+# 只跟踪：源码 + 最终编译产物 logzilla.exe
+# 不跟踪：依赖、中间构建产物、临时文件
+# ==========================================================
+
+# === Node 依赖 ===
+node_modules/
+src/wasm/node_modules/
+
+# === 前端构建产物 ===
+dist/
+
+# === Rust 构建产物 ===
+# 主 crate：忽略 target 全部内容，但保留 32 位 release 的最终 exe（用于分发）
+src-tauri/target/*
+!src-tauri/target/i686-pc-windows-msvc
+src-tauri/target/i686-pc-windows-msvc/*
+!src-tauri/target/i686-pc-windows-msvc/release
+src-tauri/target/i686-pc-windows-msvc/release/*
+!src-tauri/target/i686-pc-windows-msvc/release/logzilla.exe
+
+# 散落的 exe 副本（打包时复制到 src-tauri 根 / 仓库根的副本，只保留 target 下的最终 exe）
+/src-tauri/logzilla.exe
+/live_import_helper.exe
+
+# 子 crate 构建产物（nucleo-wasm/pkg 与 src/wasm 重复，是构建输出）
+src-tauri/nucleo-wasm/target/
+src-tauri/nucleo-wasm/pkg/
+src-tauri/live_import_helper/target/
+
+# === 仓库根散落的构建产物 / 测试捕获 ===
+*.obj
+*.o
+*.a
+*.rlib
+*.pdb
+/COM*.txt
+/unknown_*.txt
+*.pdf
+
+# === 编辑器 / 操作系统 ===
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+ehthumbs.db
+
+# === Claude Code 会话数据 ===
+.claude/
+
+# === 日志 ===
+*.log
