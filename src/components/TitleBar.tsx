@@ -1,4 +1,4 @@
-import { Zap, Minus, X } from 'lucide-react';
+import { Minus, X } from 'lucide-react';
 import { motion } from 'motion/react';
 import { useState, useEffect, useRef } from 'react';
 
@@ -107,9 +107,7 @@ export function TitleBar() {
     >
       {/* Left - App Name & Icon */}
       <div className="flex items-center gap-2 pl-4" data-tauri-drag-region>
-        <div className="flex items-center justify-center w-8 h-8 rounded-lg bg-gradient-to-br from-primary to-[#5B4FD6] text-white">
-          <Zap className="w-5 h-5" />
-        </div>
+        <img src="/logo.svg" alt="Logzilla" className="w-8 h-8 select-none pointer-events-none" data-tauri-drag-region />
         <span className="font-semibold" data-tauri-drag-region>Logzilla</span>
       </div>
 
