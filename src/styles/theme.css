@@ -35,6 +35,7 @@
   --shadow-lg: 0 8px 32px rgba(0, 0, 0, 0.16);
   --search-match-bg: rgba(59, 130, 246, 0.2);
   --search-current-bg: rgba(59, 130, 246, 0.35);
+  --locate-flash-bg: rgba(245, 158, 11, 0.55);
 }
 
 .dark {
@@ -70,6 +71,7 @@
   --shadow-lg: 0 8px 32px rgba(0, 0, 0, 0.5);
   --search-match-bg: rgba(200, 200, 200, 0.15);
   --search-current-bg: rgba(200, 200, 200, 0.28);
+  --locate-flash-bg: rgba(251, 191, 36, 0.6);
 }
 
 @theme inline {

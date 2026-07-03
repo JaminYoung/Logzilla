@@ -1,6 +1,6 @@
 import { useRef, useEffect, useState, useMemo, useCallback } from 'react';
 import { motion } from 'motion/react';
-import { Trash2, SaveAll, Copy, Scan, Search as SearchIcon, Circle, ChevronDown, Bluetooth, Usb, Cable, HelpCircle } from 'lucide-react';
+import { Trash2, SaveAll, Copy, Scan, Search as SearchIcon, Circle, ChevronDown, Bluetooth, Usb, Cable, HelpCircle, LocateFixed } from 'lucide-react';
 
 import { type FilterRule } from './FilterSettingsDialog';
 import { type HighlightRule } from './HighlightSettingsDialog';
@@ -134,6 +134,13 @@ interface DomLogListProps {
   searchMode: 'fuzzy' | 'plain' | 'regex';
   searchCaseSensitive: boolean;
   searchActive: boolean;
+  /** Parallel to `lines`: original index into the source buffer for each row.
+   *  Only the filter view passes this so its rows carry data-original-index,
+   *  enabling "定位日志" to scroll the main view to the matching source row. */
+  originalIndices?: number[];
+  /** When true, the rAF auto-follow-to-bottom is skipped (used while locating
+   *  a row so smooth-scroll isn't yanked back to the bottom). */
+  pauseAutoFollowRef?: React.RefObject<boolean>;
 }
 
 function DomLogList({
@@ -148,10 +155,12 @@ function DomLogList({
   searchMode,
   searchCaseSensitive,
   searchActive,
+  originalIndices,
+  pauseAutoFollowRef,
 }: DomLogListProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const scrollableRef = useRef<HTMLDivElement>(null);
-  const pendingRef = useRef<string[]>([]);
+  const pendingRef = useRef<{ text: string; idx?: number }[]>([]);
   const prevLenRef = useRef(0);
   const isAtBottomRef = useRef(true);
   const hlEnabledRef = useRef(hlEnabled);
@@ -161,6 +170,7 @@ function DomLogList({
   const searchQueryRef = useRef(searchQuery);
   const searchModeRef = useRef(searchMode);
   const searchCaseSensitiveRef = useRef(searchCaseSensitive);
+  const originalIndicesRef = useRef<number[] | undefined>(originalIndices);
   hlEnabledRef.current = hlEnabled;
   hlRulesRef.current = hlRules;
   fontSizeRef.current = fontSize;
@@ -168,6 +178,7 @@ function DomLogList({
   searchQueryRef.current = searchQuery;
   searchModeRef.current = searchMode;
   searchCaseSensitiveRef.current = searchCaseSensitive;
+  originalIndicesRef.current = originalIndices;
 
   // Perpetual rAF flush loop — reads data-window-moving from DOM to avoid
   // React re-renders. During window resize, skips scrollTop (the expensive
@@ -187,12 +198,13 @@ function DomLogList({
           const mode = searchModeRef.current;
           const cs = searchCaseSensitiveRef.current;
           const frag = document.createDocumentFragment();
-          for (const text of batch) {
+          for (const { text, idx } of batch) {
             const div = document.createElement('div');
             div.className = isDark
               ? 'py-0.5 hover:bg-white/5 px-2 -mx-2 rounded transition-colors'
               : 'py-0.5 hover:bg-accent/60 px-2 -mx-2 rounded transition-colors';
             div.dataset.originalText = text;
+            if (idx !== undefined) div.dataset.originalIndex = String(idx);
             const span = document.createElement('span');
             span.className = 'select-text break-all';
             const fs = fontSizeRef.current;
@@ -226,7 +238,7 @@ function DomLogList({
         }
 
         // Auto-scroll: skip during window resize to avoid forced layout of 1000s of lines
-        if (isAtBottomRef.current && !searchActiveRef.current && scrollableRef.current && !isMoving) {
+        if (isAtBottomRef.current && !searchActiveRef.current && scrollableRef.current && !isMoving && !pauseAutoFollowRef?.current) {
           scrollableRef.current.scrollTop = scrollableRef.current.scrollHeight;
         }
       } catch (e) {
@@ -242,7 +254,14 @@ function DomLogList({
   // Push new data to pending queue — light React touch only
   useEffect(() => {
     if (lines.length > prevLenRef.current) {
-      pendingRef.current.push(...lines.slice(prevLenRef.current));
+      const start = prevLenRef.current;
+      const slice = lines.slice(start);
+      const idxArr = originalIndicesRef.current;
+      const mapped = slice.map((text, i) => ({
+        text,
+        idx: idxArr ? idxArr[start + i] : undefined,
+      }));
+      pendingRef.current.push(...mapped);
       prevLenRef.current = lines.length;
     } else if (lines.length < prevLenRef.current) {
       // Logs were cleared (or trimmed) — reset DOM and refs so new logs render correctly
@@ -414,6 +433,10 @@ export function LogPanel({
   const ctxLineRef = useRef('');
   const ctxViewIdRef = useRef(0);
   const ctxSavedSelectionRef = useRef('');
+  const ctxOriginalIndexRef = useRef<string | null>(null);
+  // Pauses rAF auto-follow-to-bottom on the main view while a "定位日志" scroll+flash is in flight.
+  const pauseAutoFollowRef = useRef(false);
+  const locateTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [protocolTooltip, setProtocolTooltip] = useState<{
     x: number;
     y: number;
@@ -433,8 +456,9 @@ export function LogPanel({
     e.stopPropagation();
     ctxSavedSelectionRef.current = window.getSelection()?.toString() || '';
     ctxContainerRef.current = e.currentTarget as HTMLElement;
-    const lineEl = (e.target as HTMLElement).closest('[class*="py-0.5"]');
+    const lineEl = (e.target as HTMLElement).closest('[data-original-text]') as HTMLElement | null;
     ctxLineRef.current = lineEl?.textContent || '';
+    ctxOriginalIndexRef.current = lineEl?.dataset.originalIndex ?? null;
     ctxViewIdRef.current = viewId;
     const menuW = 180;
     const menuH = 160;
@@ -476,6 +500,69 @@ export function LogPanel({
     setCtxMenu(null);
     const selectedText = ctxSavedSelectionRef.current;
     onSearchHere?.(ctxViewIdRef.current, selectedText || undefined);
+  };
+
+  // Scroll the main (upper) view to the row whose original buffer index == `index`,
+  // then flash it twice. Mirrors the DOM pattern in App.tsx handleSearchNavigate.
+  const locateLogInMainView = useCallback((viewId: string, index: number) => {
+    const scrollableDiv = document.querySelector(`[data-view-id="${viewId}"]`) as HTMLElement | null;
+    if (!scrollableDiv) return;
+    const logContainer = scrollableDiv.querySelector(':scope > div');
+    if (!logContainer) return;
+
+    const tryLocate = (attempt: number) => {
+      const lineDivs = logContainer.querySelectorAll(':scope > div');
+      const target = lineDivs[index] as HTMLElement | undefined;
+      if (!target) {
+        // rAF flush may lag behind the just-grown logs buffer; retry a few frames.
+        if (attempt < 10) requestAnimationFrame(() => tryLocate(attempt + 1));
+        return;
+      }
+
+      // Cancel any in-flight resume so a rapid re-locate doesn't prematurely
+      // re-enable auto-follow (and snap to bottom) mid-flash.
+      if (locateTimeoutRef.current) clearTimeout(locateTimeoutRef.current);
+      // Pause auto-follow BEFORE smooth-scrolling: scrollTo is async, so the rAF
+      // loop would otherwise see the stale isAtBottomRef=true and jump to bottom.
+      pauseAutoFollowRef.current = true;
+
+      // Clear prior flash, then restart the animation (reflow trick for re-locate).
+      document.querySelectorAll('.locate-flash').forEach(el => el.classList.remove('locate-flash'));
+      target.classList.remove('locate-flash');
+      void target.offsetWidth;
+
+      // Center the target row in the scroll viewport.
+      const containerRect = scrollableDiv.getBoundingClientRect();
+      const targetRect = target.getBoundingClientRect();
+      const targetTopInContainer = targetRect.top - containerRect.top + scrollableDiv.scrollTop;
+      const desiredScrollTop = targetTopInContainer - scrollableDiv.clientHeight / 2 + target.offsetHeight / 2;
+      scrollableDiv.scrollTo({ top: Math.max(0, desiredScrollTop), behavior: 'smooth' });
+
+      target.classList.add('locate-flash');
+      const onEnd = () => target.classList.remove('locate-flash');
+      target.addEventListener('animationend', onEnd, { once: true });
+
+      // Safety: resume auto-follow once the flash is done (~1.3s anim + buffer).
+      locateTimeoutRef.current = setTimeout(() => {
+        pauseAutoFollowRef.current = false;
+        target.classList.remove('locate-flash');
+        target.removeEventListener('animationend', onEnd);
+      }, 1500);
+    };
+
+    tryLocate(0);
+  }, []);
+
+  const handleCtxLocateLog = () => {
+    setCtxMenu(null);
+    const filterViewId = ctxViewIdRef.current;
+    if (filterViewId % 2 !== 1) return; // only the filter (lower) view offers locate
+    const idxStr = ctxOriginalIndexRef.current;
+    if (idxStr == null) return;
+    const targetIndex = parseInt(idxStr, 10);
+    if (Number.isNaN(targetIndex)) return;
+    const mainViewId = filterViewId - 1; // view1→view0, view3→view2
+    locateLogInMainView(`view${mainViewId}`, targetIndex);
   };
 
   const handleCtxSave = () => {
@@ -527,10 +614,11 @@ export function LogPanel({
 
   const hasSplit = filterEnabled && filterRules.length > 0;
 
-  const filteredLogs = useMemo(() => {
+  const filteredEntries = useMemo(() => {
     if (!hasSplit) return [];
-    return logs.filter(line =>
-      filterRules.some(rule => {
+    const out: { text: string; idx: number }[] = [];
+    logs.forEach((line, idx) => {
+      if (filterRules.some(rule => {
         try {
           if (rule.matchType === 'regex') {
             return new RegExp(rule.keyword).test(line);
@@ -539,9 +627,14 @@ export function LogPanel({
         } catch {
           return false;
         }
-      })
-    );
+      })) {
+        out.push({ text: line, idx });
+      }
+    });
+    return out;
   }, [logs, hasSplit, filterRules]);
+  const filteredLogs = useMemo(() => filteredEntries.map(e => e.text), [filteredEntries]);
+  const filteredIndices = useMemo(() => filteredEntries.map(e => e.idx), [filteredEntries]);
 
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
@@ -739,7 +832,7 @@ export function LogPanel({
             className="min-h-0 rounded-lg bg-white dark:bg-white/[0.03]"
             style={{ flex: splitRatio }}
           >
-            <DomLogList lines={logs} emptyMessage="等待日志..." onContextMenu={makeContextMenuHandler(viewIdBase)} highlightEnabled={highlightEnabled} highlightRules={highlightRules} fontSize={fontSize} viewId={`view${viewIdBase}`} searchQuery={searchQuery} searchMode={searchMode} searchCaseSensitive={searchCaseSensitive} searchActive={searchQuery !== '' && view0Active} />
+            <DomLogList lines={logs} emptyMessage="等待日志..." onContextMenu={makeContextMenuHandler(viewIdBase)} highlightEnabled={highlightEnabled} highlightRules={highlightRules} fontSize={fontSize} viewId={`view${viewIdBase}`} searchQuery={searchQuery} searchMode={searchMode} searchCaseSensitive={searchCaseSensitive} searchActive={searchQuery !== '' && view0Active} pauseAutoFollowRef={pauseAutoFollowRef} />
           </div>
           <div
             className="flex items-center justify-center cursor-row-resize shrink-0 py-1 group"
@@ -751,12 +844,12 @@ export function LogPanel({
             className="min-h-0 rounded-lg bg-white dark:bg-white/[0.03]"
             style={{ flex: 1 - splitRatio }}
           >
-            <DomLogList lines={filteredLogs} emptyMessage={filterRules.length > 0 ? '无匹配日志' : '请添加过滤规则'} onContextMenu={makeContextMenuHandler(viewIdBase + 1)} highlightEnabled={highlightEnabled} highlightRules={highlightRules} fontSize={fontSize} viewId={`view${viewIdBase + 1}`} searchQuery={searchQuery} searchMode={searchMode} searchCaseSensitive={searchCaseSensitive} searchActive={searchQuery !== '' && view1Active && hasSplit} />
+            <DomLogList lines={filteredLogs} emptyMessage={filterRules.length > 0 ? '无匹配日志' : '请添加过滤规则'} onContextMenu={makeContextMenuHandler(viewIdBase + 1)} highlightEnabled={highlightEnabled} highlightRules={highlightRules} fontSize={fontSize} viewId={`view${viewIdBase + 1}`} searchQuery={searchQuery} searchMode={searchMode} searchCaseSensitive={searchCaseSensitive} searchActive={searchQuery !== '' && view1Active && hasSplit} originalIndices={filteredIndices} pauseAutoFollowRef={pauseAutoFollowRef} />
           </div>
         </div>
       ) : (
         <div className="flex-1 min-h-0">
-          <DomLogList lines={logs} emptyMessage="等待日志..." onContextMenu={makeContextMenuHandler(viewIdBase)} highlightEnabled={highlightEnabled} highlightRules={highlightRules} fontSize={fontSize} viewId={`view${viewIdBase}`} searchQuery={searchQuery} searchMode={searchMode} searchCaseSensitive={searchCaseSensitive} searchActive={searchQuery !== '' && view0Active} />
+          <DomLogList lines={logs} emptyMessage="等待日志..." onContextMenu={makeContextMenuHandler(viewIdBase)} highlightEnabled={highlightEnabled} highlightRules={highlightRules} fontSize={fontSize} viewId={`view${viewIdBase}`} searchQuery={searchQuery} searchMode={searchMode} searchCaseSensitive={searchCaseSensitive} searchActive={searchQuery !== '' && view0Active} pauseAutoFollowRef={pauseAutoFollowRef} />
         </div>
       )}
 
@@ -800,6 +893,15 @@ export function LogPanel({
           <SearchIcon className="w-4 h-4" />
           搜索
         </div>
+        {ctxViewIdRef.current % 2 === 1 && ctxOriginalIndexRef.current != null && (
+          <div
+            onClick={handleCtxLocateLog}
+            className="px-4 py-2.5 text-sm cursor-pointer hover:bg-black/10 dark:hover:bg-white/10 transition-colors flex items-center gap-2"
+          >
+            <LocateFixed className="w-4 h-4" />
+            定位日志
+          </div>
+        )}
         <div
           onClick={handleCtxSave}
           className="px-4 py-2.5 text-sm cursor-pointer hover:bg-black/10 dark:hover:bg-white/10 transition-colors flex items-center gap-2"
