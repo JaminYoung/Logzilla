@@ -93,9 +93,14 @@ fn write_btsnoop<W: Write>(writer: &mut W, packets: &[HciPacket]) -> Result<(), 
 /// Accepts:
 ///   (15:20:52.807) [00:00:19.017] CMD => 03 0c 00    → data: 01 03 0c 00
 ///   [00:00:19.017] CMD => 03 0c 00                    → data: 01 03 0c 00
+///   CMD => 03 0c 00                                   → data: 01 03 0c 00 (ts = None)
+///
+/// The timestamp is `Option<u64>`: `Some` when the line carries a PC `(…)` and/or
+/// chip `[…]` timestamp; `None` when it's a valid HCI packet but has no timestamp
+/// (the caller in `extract_hci` carries forward the last seen timestamp).
 ///
 /// H4 mapping: CMD → 0x01, ACL → 0x02, EVT → 0x04
-fn parse_hci_line(line: &str) -> Option<(u64, u32, Vec<u8>)> {
+fn parse_hci_line(line: &str) -> Option<(Option<u64>, u32, Vec<u8>)> {
     let line = line.trim();
     if line.is_empty() {
         return None;
@@ -108,7 +113,7 @@ fn parse_hci_line(line: &str) -> Option<(u64, u32, Vec<u8>)> {
     if line.starts_with('(') {
         let close_paren = line.find(')')?;
         let ts_str = &line[1..close_paren];
-        if ts_str.len() != 12 {
+        if ts_str.len() != 12 || !ts_str.is_ascii() {
             return None;
         }
         let h: u32 = ts_str[0..2].parse().ok()?;
@@ -122,21 +127,25 @@ fn parse_hci_line(line: &str) -> Option<(u64, u32, Vec<u8>)> {
         remaining = line;
     }
 
-    // ---- mandatory chip timestamp [HH:MM:SS.mmm] ----
-    if !remaining.starts_with('[') {
-        return None;
+    // ---- optional chip timestamp [HH:MM:SS.mmm] ----
+    let chip_ts: Option<(u32, u32, u32, u32)>;
+    let rest: &str;
+    if remaining.starts_with('[') {
+        let close_bracket = remaining.find(']')?;
+        let ts_part = &remaining[1..close_bracket];
+        if ts_part.len() != 12 || !ts_part.is_ascii() {
+            return None;
+        }
+        let chip_h: u32 = ts_part[0..2].parse().ok()?;
+        let chip_m: u32 = ts_part[3..5].parse().ok()?;
+        let chip_s: u32 = ts_part[6..8].parse().ok()?;
+        let chip_ms: u32 = ts_part[9..12].parse().ok()?;
+        chip_ts = Some((chip_h, chip_m, chip_s, chip_ms));
+        rest = remaining[close_bracket + 1..].trim_start();
+    } else {
+        chip_ts = None;
+        rest = remaining;
     }
-    let close_bracket = remaining.find(']')?;
-    let ts_part = &remaining[1..close_bracket];
-    if ts_part.len() != 12 {
-        return None;
-    }
-    let chip_h: u32 = ts_part[0..2].parse().ok()?;
-    let chip_m: u32 = ts_part[3..5].parse().ok()?;
-    let chip_s: u32 = ts_part[6..8].parse().ok()?;
-    let chip_ms: u32 = ts_part[9..12].parse().ok()?;
-
-    let rest = remaining[close_bracket + 1..].trim_start();
     if rest.len() < 6 {
         return None;
     }
@@ -184,10 +193,11 @@ fn parse_hci_line(line: &str) -> Option<(u64, u32, Vec<u8>)> {
     data_with_h4.push(h4_type);
     data_with_h4.extend_from_slice(&raw_bytes);
 
-    // Timestamp
-    let timestamp = match pc_ts {
-        Some((h, m, s, ms)) => local_pc_timestamp_to_btsnoop(h, m, s, ms),
-        None => chip_timestamp_to_btsnoop(chip_h, chip_m, chip_s, chip_ms),
+    // Timestamp: PC ts preferred, else chip ts, else None (caller carries forward).
+    let timestamp: Option<u64> = match (pc_ts, chip_ts) {
+        (Some((h, m, s, ms)), _) => Some(local_pc_timestamp_to_btsnoop(h, m, s, ms)),
+        (None, Some((h, m, s, ms))) => Some(chip_timestamp_to_btsnoop(h, m, s, ms)),
+        (None, None) => None,
     };
 
     Some((timestamp, flags, data_with_h4))
@@ -195,13 +205,22 @@ fn parse_hci_line(line: &str) -> Option<(u64, u32, Vec<u8>)> {
 
 #[tauri::command]
 pub fn extract_hci(input_path: String) -> Result<String, String> {
-    let content = std::fs::read_to_string(&input_path)
+    // Read raw bytes and decode lossily so non-UTF-8 (e.g. GBK) files don't fail the
+    // whole read. HCI packet lines are pure ASCII and parse correctly; any garbled
+    // non-ASCII lines simply don't match the HCI format and are skipped.
+    let bytes = std::fs::read(&input_path)
         .map_err(|e| format!("无法读取文件: {}", e))?;
+    let content = String::from_utf8_lossy(&bytes);
 
     let mut packets: Vec<HciPacket> = Vec::new();
+    let mut last_ts: Option<u64> = None;
 
     for line in content.lines() {
-        if let Some((ts, flags, data)) = parse_hci_line(line) {
+        if let Some((ts_opt, flags, data)) = parse_hci_line(line) {
+            // Carry forward the last seen timestamp when this line has none.
+            let ts = ts_opt.or(last_ts);
+            let Some(ts) = ts else { continue; };
+            last_ts = Some(ts);
             packets.push(HciPacket {
                 timestamp_usec: ts,
                 flags,
@@ -384,5 +403,68 @@ mod tests {
         // Roughly 1970 years in microseconds
         assert!(offset > 62_000_000_000_000_000);
         assert!(offset < 63_000_000_000_000_000);
+    }
+
+    #[test]
+    fn test_parse_no_ts_packet() {
+        // No timestamp at all → valid packet, ts = None (caller carries forward).
+        let line = "CMD => 03 0c 00";
+        let result = parse_hci_line(line);
+        assert!(result.is_some());
+        let (ts, flags, data) = result.unwrap();
+        assert!(ts.is_none(), "no-ts line should yield None timestamp");
+        assert_eq!(flags, 0);
+        assert_eq!(&data, &[0x01, 0x03, 0x0c, 0x00]);
+    }
+
+    #[test]
+    fn test_parse_pc_ts_only() {
+        // PC timestamp but no chip [..] timestamp → previously dropped, now uses PC ts.
+        let line = "(15:20:52.807) CMD => 03 0c 00";
+        let result = parse_hci_line(line);
+        assert!(result.is_some());
+        let (ts, flags, data) = result.unwrap();
+        assert!(ts.is_some(), "PC-ts-only line should yield Some timestamp");
+        assert_eq!(flags, 0);
+        assert_eq!(&data, &[0x01, 0x03, 0x0c, 0x00]);
+    }
+
+    #[test]
+    fn test_extract_carry_forward() {
+        // Line 2 has no timestamp; it should inherit line 1's timestamp and still
+        // produce a packet (previously it was dropped).
+        let dir = std::env::temp_dir();
+        let path = dir.join("logzilla_carry_fwd_test.txt");
+        let content = "[00:00:00.107] CMD => 03 0c 00\nCMD => 04 0c 00\n";
+        std::fs::write(&path, content).unwrap();
+        let result = extract_hci(path.to_str().unwrap().to_string());
+        let _ = std::fs::remove_file(path.with_extension("cfa"));
+        let _ = std::fs::remove_file(&path);
+        assert!(result.is_ok(), "extract_hci failed: {:?}", result.err());
+        let msg = result.unwrap();
+        assert!(
+            msg.contains("2 个 HCI 数据包"),
+            "expected 2 packets (carry-forward), got: {}", msg
+        );
+    }
+
+    #[test]
+    fn test_extract_gbk_lossy() {
+        // 0x81 0x40 is invalid UTF-8 (simulates GBK). Old read_to_string would fail
+        // the whole read; lossy decode lets the ASCII HCI line parse.
+        let dir = std::env::temp_dir();
+        let path = dir.join("logzilla_gbk_lossy_test.txt");
+        let mut bytes: Vec<u8> = vec![0x81, 0x40, 0x0A];
+        bytes.extend_from_slice(b"[00:00:00.107] CMD => 03 0c 00\n");
+        std::fs::write(&path, &bytes).unwrap();
+        let result = extract_hci(path.to_str().unwrap().to_string());
+        let _ = std::fs::remove_file(path.with_extension("cfa"));
+        let _ = std::fs::remove_file(&path);
+        assert!(result.is_ok(), "GBK-ish file should not fail read: {:?}", result.err());
+        let msg = result.unwrap();
+        assert!(
+            msg.contains("1 个 HCI 数据包"),
+            "expected 1 packet from lossy-decoded GBK file, got: {}", msg
+        );
     }
 }
