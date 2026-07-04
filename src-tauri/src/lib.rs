@@ -4,7 +4,7 @@ use std::collections::HashMap;
 mod core;
 mod commands;
 
-use commands::{dcf_commands, serial_commands, config_commands, flash_commands, file_commands, hci_commands, live_import_commands, lc3_commands, usb_audio_commands, hci_parser_commands, search_commands};
+use commands::{dcf_commands, serial_commands, config_commands, file_commands, hci_commands, live_import_commands, lc3_commands, usb_audio_commands, hci_parser_commands, search_commands};
 use crate::core::serial::port::SerialPortHandle;
 
 pub struct AppState {
@@ -14,7 +14,6 @@ pub struct AppState {
     pub info_data: Mutex<Vec<u8>>,
     pub info_offset: Mutex<usize>,
     pub info_len: Mutex<usize>,
-    pub flash_engine: Mutex<core::flash::engine::FlashEngine>,
     pub serial_ports: Mutex<HashMap<String, Arc<SerialPortHandle>>>,
     pub connected_ports: Mutex<Vec<String>>,
     pub lc3_capture_buffers: Mutex<HashMap<String, Vec<u8>>>,
@@ -40,7 +39,6 @@ impl Default for AppState {
             info_data: Mutex::new(Vec::new()),
             info_offset: Mutex::new(0),
             info_len: Mutex::new(0),
-            flash_engine: Mutex::new(core::flash::engine::FlashEngine::new()),
             serial_ports: Mutex::new(HashMap::new()),
             connected_ports: Mutex::new(Vec::new()),
             lc3_capture_buffers: Mutex::new(HashMap::new()),
@@ -62,26 +60,16 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .manage(AppState::default())
-        .manage(search_commands::SearchState {
-            engine: Arc::new(core::search::engine::SearchEngine::new()),
-        })
         .invoke_handler(tauri::generate_handler![
             dcf_commands::open_dcf,
-            dcf_commands::save_dcf,
             serial_commands::list_serial_ports,
             serial_commands::open_serial_port,
             serial_commands::close_serial_port,
             serial_commands::send_serial_data,
             serial_commands::read_serial_data,
-            config_commands::get_config_value,
-            config_commands::set_config_value,
             config_commands::apply_config_changes,
-            flash_commands::start_flash,
-            flash_commands::cancel_flash,
-            flash_commands::get_flash_progress,
             file_commands::write_file,
             file_commands::read_file,
-            file_commands::append_file,
             hci_commands::extract_hci,
             hci_commands::reveal_in_explorer,
             live_import_commands::live_import_init,
@@ -89,7 +77,6 @@ pub fn run() {
             live_import_commands::live_import_is_ready,
             live_import_commands::live_import_stats,
             live_import_commands::live_import_close,
-            live_import_commands::live_import_find_exe,
             live_import_commands::live_import_is_fts_running,
             live_import_commands::launch_wps,
             lc3_commands::lc3_get_connected_ports,
@@ -97,16 +84,11 @@ pub fn run() {
             lc3_commands::lc3_stop_capture,
             lc3_commands::lc3_get_capture_status,
             lc3_commands::lc3_import_file,
-            lc3_commands::lc3_decode,
-            lc3_commands::lc3_save_wav,
-            lc3_commands::lc3_save_raw,
             lc3_commands::lc3_decode_and_export,
             usb_audio_commands::usb_audio_analyze,
             usb_audio_commands::usb_audio_extract,
             hci_parser_commands::parse_protocol_line,
-            search_commands::search_logs,
             search_commands::get_logs,
-            search_commands::update_logs,
             search_commands::clear_logs,
         ])
         .run(tauri::generate_context!())

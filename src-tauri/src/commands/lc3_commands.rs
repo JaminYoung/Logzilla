@@ -82,64 +82,6 @@ pub fn lc3_import_file(path: String) -> Result<Vec<u8>, String> {
 }
 
 #[tauri::command]
-pub async fn lc3_decode(
-    data: Vec<u8>,
-    sample_rate: u32,
-    num_channels: u32,
-    bitrate: u32,
-    frame_duration_ms: f64,
-    hrmode: bool,
-) -> Result<Vec<u8>, String> {
-    tokio::task::spawn_blocking(move || {
-        let config = DecodeConfig {
-            sample_rate,
-            num_channels,
-            bitrate,
-            frame_duration_ms,
-            hrmode,
-            libpath: None,
-        };
-
-        let decoder = Lc3Decoder::new(&config)?;
-        let frame_bytes = decoder.get_frame_bytes();
-        let _frame_samples = decoder.get_frame_samples();
-
-        let data_len = data.len();
-        let mut offset = 0;
-        let mut pcm_chunks: Vec<u8> = Vec::new();
-
-        while offset + frame_bytes <= data_len {
-            let frame_data = &data[offset..offset + frame_bytes];
-            offset += frame_bytes;
-            let pcm = decoder.decode_frame(frame_data)?;
-            pcm_chunks.extend_from_slice(&pcm);
-        }
-
-        Ok(pcm_chunks)
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
-#[tauri::command]
-pub fn lc3_save_wav(
-    pcm_data: Vec<u8>,
-    path: String,
-    sample_rate: u32,
-    num_channels: u32,
-) -> Result<(), String> {
-    export::save_wav(&pcm_data, &path, sample_rate, num_channels as u16)
-}
-
-#[tauri::command]
-pub fn lc3_save_raw(
-    data: Vec<u8>,
-    path: String,
-) -> Result<(), String> {
-    export::save_raw(&data, &path)
-}
-
-#[tauri::command]
 pub async fn lc3_decode_and_export(
     data: Vec<u8>,
     sample_rate: u32,

@@ -1,7 +1,6 @@
 pub mod dcf_commands;
 pub mod serial_commands;
 pub mod config_commands;
-pub mod flash_commands;
 pub mod file_commands;
 pub mod hci_commands;
 pub mod live_import_commands;

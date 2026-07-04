@@ -69,9 +69,3 @@ pub fn open_dcf(path: String, state: State<AppState>) -> Result<DcfInfo, String>
         info_data,
     })
 }
-
-#[tauri::command]
-pub fn save_dcf(path: String, dcf_data: Vec<u8>) -> Result<(), String> {
-    dcf::writer::save_dcf(&path, &dcf_data)
-        .map_err(|e| format!("Failed to save DCF: {}", e))
-}

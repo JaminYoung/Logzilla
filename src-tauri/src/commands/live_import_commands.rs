@@ -7,6 +7,7 @@ type HRESULT = i32;
 #[allow(dead_code)]
 const S_OK: HRESULT = 0;
 
+#[allow(dead_code)] // 仅 32 位直连路径使用
 fn pc_timestamp_to_filetime(ts: &str) -> i64 {
     let ts = ts.trim();
     if ts.len() < 12 { return current_filetime(); }
@@ -21,10 +22,12 @@ fn pc_timestamp_to_filetime(ts: &str) -> i64 {
     unix_usec_to_filetime(utc_dt.timestamp_micros() as i64)
 }
 
+#[allow(dead_code)] // 仅 32 位直连路径使用
 fn current_filetime() -> i64 {
     unix_usec_to_filetime(chrono::Utc::now().timestamp_micros())
 }
 
+#[allow(dead_code)] // 仅 32 位直连路径使用
 fn unix_usec_to_filetime(unix_usec: i64) -> i64 {
     let unix_sec = unix_usec / 1_000_000;
     let sub_us = unix_usec % 1_000_000;
@@ -103,6 +106,7 @@ pub struct SendStats {
 
 static SEND_STATS: Mutex<SendStats> = Mutex::new(SendStats { total: 0, ok: 0, err: 0, last_hr: 0, last_err_msg: String::new() });
 
+#[allow(dead_code)] // 仅 32 位直连路径使用
 fn inc_send_ok() {
     let mut s = SEND_STATS.lock().unwrap();
     s.total += 1;
@@ -110,6 +114,7 @@ fn inc_send_ok() {
     s.last_hr = 0;
 }
 
+#[allow(dead_code)] // 仅 32 位直连路径使用
 fn inc_send_err(hr: i32, msg: String) {
     let mut s = SEND_STATS.lock().unwrap();
     s.total += 1;
@@ -119,110 +124,38 @@ fn inc_send_err(hr: i32, msg: String) {
     eprintln!("[LOGZILLA] SendFrame ERR: 0x{:x} {}", hr, msg);
 }
 
-// ========= 64-bit: Helper process implementation =========
+// ========= 64-bit: Live Import 不可用（发布走 32 位直连 DLL 方案） =========
+// 64 位进程无法加载 32 位厂商 DLL（LiveImportAPI.dll）。原先靠一个 32 位 helper
+// 子进程桥接，已随 32 位直连方案一并移除。64 位（dev）构建下 Live Import 返回
+// 诊断而非 panic；正式功能在 32 位构建（见下方 32-bit 实现）。
 #[cfg(target_pointer_width = "64")]
 mod imp {
     use super::*;
-    use std::io::{BufRead, BufReader, Write};
-    use std::process::{Command, Stdio};
-
-    struct Helper {
-        process: std::process::Child,
-        stdin: std::process::ChildStdin,
-        stdout: BufReader<std::process::ChildStdout>,
-    }
-    unsafe impl Send for Helper {}
-    unsafe impl Sync for Helper {}
-
-    impl Helper {
-        fn send_cmd(&mut self, cmd: &str) -> Result<String, String> {
-            writeln!(self.stdin, "{}", cmd).map_err(|e| format!("写入命令失败: {}", e))?;
-            self.stdin.flush().map_err(|e| format!("刷新失败: {}", e))?;
-            let mut line = String::new();
-            self.stdout.read_line(&mut line).map_err(|e| format!("读取响应失败: {}", e))?;
-            Ok(line.trim().to_string())
-        }
-        fn init(&mut self, conn: &str, config: &str) -> Result<(), String> {
-            let config = config.replace('\n', "\x1E");
-            let r = self.send_cmd(&format!("INIT|{}|{}", conn, config))?;
-            if r == "OK" { Ok(()) } else { Err(r.trim_start_matches("ERR|").to_string()) }
-        }
-        fn is_ready(&mut self) -> Result<bool, String> {
-            let r = self.send_cmd("READY")?;
-            if r.starts_with("OK|") { Ok(r.trim_start_matches("OK|") == "1") } else { Err(r.trim_start_matches("ERR|").to_string()) }
-        }
-        fn send_frame(&mut self, drf: i32, side: i32, ts: i64, hex: &str) -> Result<(), String> {
-            let r = self.send_cmd(&format!("FRAME|{}|{}|{}|{}", drf, side, ts, hex))?;
-            if r.starts_with("OK") { 
-                inc_send_ok();
-                Ok(()) 
-            } else { 
-                let msg = r.trim_start_matches("ERR|").to_string();
-                inc_send_err(-1, msg.clone());
-                Err(msg.clone())
-            }
-        }
-        fn close(mut self) {
-            let _ = writeln!(self.stdin, "CLOSE"); let _ = self.stdin.flush(); let _ = self.process.wait();
-        }
-    }
-
-    fn helper_exe() -> String {
-        std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf())).unwrap_or_else(|| std::path::PathBuf::from("."))
-            .join("live_import_helper.exe").to_string_lossy().to_string()
-    }
-
-    static LIVE_IMPORT: Mutex<Option<Helper>> = Mutex::new(None);
 
     pub fn init(wps_path: &str) -> Result<LiveImportDiag, String> {
         let ini_path = std::path::Path::new(wps_path).join("liveimport.ini");
-        let (conn_str, config_str) = parse_ini(ini_path.to_str().unwrap())?;
-        let fts_running = is_fts_running();
-        let helper_path = helper_exe();
-        if !std::path::Path::new(&helper_path).exists() {
-            return Ok(LiveImportDiag { conn_string: conn_str, dll_loaded: false, init_hr: -1, init_success: 0, fts_running });
-        }
-        let mut child = match Command::new(&helper_path).arg(wps_path).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn() {
-            Ok(c) => c,
-            Err(_) => return Ok(LiveImportDiag { conn_string: conn_str, dll_loaded: false, init_hr: -1, init_success: 0, fts_running }),
-        };
-        let stdin = child.stdin.take().ok_or("无法获取 stdin")?;
-        let stdout = child.stdout.take().ok_or("无法获取 stdout")?;
-        let mut helper = Helper { process: child, stdin, stdout: BufReader::new(stdout) };
-        let r = helper.init(&conn_str, &config_str);
-        let (hr, success) = match &r { Ok(()) => (0, 1), Err(_) => (-1, 0) };
-        let diag = LiveImportDiag { conn_string: conn_str, dll_loaded: true, init_hr: hr, init_success: success, fts_running };
-        if r.is_ok() { let mut g = LIVE_IMPORT.lock().unwrap(); *g = Some(helper); }
-        Ok(diag)
+        let conn_string = parse_ini(ini_path.to_str().unwrap_or(""))
+            .map(|(c, _)| c)
+            .unwrap_or_default();
+        Ok(LiveImportDiag {
+            conn_string,
+            dll_loaded: false,
+            init_hr: -1,
+            init_success: 0,
+            fts_running: is_fts_running(),
+        })
     }
 
-    pub fn send_frame(data_hex: &str, h4_type: u8, sent: bool, pc_timestamp: &str) -> Result<(), String> {
-        let mut g = LIVE_IMPORT.lock().unwrap();
-        let helper = g.as_mut().ok_or("Live Import 未初始化")?;
-        let drf: i32 = 1 << ((h4_type as i32) - 1);
-        let side: i32 = if sent { 0 } else { 1 };
-        let ts = if pc_timestamp.is_empty() { current_filetime() } else { pc_timestamp_to_filetime(pc_timestamp) };
-        let r = helper.send_frame(drf, side, ts, data_hex);
-        eprintln!("[LOGZILLA] send_frame drf={drf} side={side} hex={data_hex} -> {:?}", r);
-        r
+    pub fn send_frame(_data_hex: &str, _h4_type: u8, _sent: bool, _pc_timestamp: &str) -> Result<(), String> {
+        Err("Live Import 仅在 32 位构建可用（当前为 64 位 dev 构建）".to_string())
     }
 
     pub fn is_ready() -> Result<bool, String> {
-        let mut g = LIVE_IMPORT.lock().unwrap();
-        g.as_mut().ok_or("Live Import 未初始化")?.is_ready()
+        Ok(false)
     }
 
     pub fn close() {
-        let mut g = LIVE_IMPORT.lock().unwrap();
-        if let Some(h) = g.take() {
-            eprintln!("[LOGZILLA] live_import_close: stopping helper process");
-            h.close();
-        } else {
-            eprintln!("[LOGZILLA] live_import_close: nothing to close (64-bit)");
-        }
-        let mut s = SEND_STATS.lock().unwrap();
-        *s = SendStats::default();
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        *SEND_STATS.lock().unwrap() = SendStats::default();
     }
 }
 
@@ -374,11 +307,6 @@ pub fn live_import_stats() -> Result<SendStats, String> {
 pub fn live_import_close() -> Result<(), String> {
     imp::close();
     Ok(())
-}
-
-#[tauri::command]
-pub fn live_import_find_exe(wps_path: String) -> Result<Option<String>, String> {
-    Ok(find_wps_exe(&wps_path))
 }
 
 #[tauri::command]

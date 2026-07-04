@@ -22,12 +22,10 @@ src-tauri/target/i686-pc-windows-msvc/release/*
 
 # 散落的 exe 副本（打包时复制到 src-tauri 根 / 仓库根的副本，只保留 target 下的最终 exe）
 /src-tauri/logzilla.exe
-/live_import_helper.exe
 
 # 子 crate 构建产物（nucleo-wasm/pkg 与 src/wasm 重复，是构建输出）
 src-tauri/nucleo-wasm/target/
 src-tauri/nucleo-wasm/pkg/
-src-tauri/live_import_helper/target/
 
 # === 仓库根散落的构建产物 / 测试捕获 ===
 *.obj

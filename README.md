@@ -64,7 +64,7 @@
 |------|------|
 | 前端框架 | React 18.3 + TypeScript 5.5 |
 | UI / 样式 | Tailwind CSS 4.3 · Motion (Framer Motion) · Lucide 图标 |
-| 状态管理 | React Hooks（Zustand 预留） |
+| 状态管理 | React Hooks（useState / useRef） |
 | 模糊搜索 | `nucleo-matcher` → WASM |
 | 后端框架 | Tauri 2 |
 | 后端语言 | Rust 2021（`serialport` / `tokio` / `libloading` / `regex` …） |
@@ -90,9 +90,8 @@ Logzilla/
 │   │   ├── lib.rs           # AppState 定义 + 命令注册
 │   │   ├── commands/        # Tauri 命令层（前端调用入口）
 │   │   └── core/            # 核心业务：dcf / xcfg / config / serial /
-│   │                        #          flash / hci / lc3 / search / usb_audio
+│   │                        #          hci / lc3 / usb_audio
 │   ├── nucleo-wasm/         # 模糊搜索子 crate（Rust → WASM）
-│   ├── live_import_helper/  # HCI 动态加载辅助程序子 crate
 │   ├── lc3.dll              # LC3 解码运行时依赖（32 位厂商 DLL）
 │   └── tauri.conf.json
 │
