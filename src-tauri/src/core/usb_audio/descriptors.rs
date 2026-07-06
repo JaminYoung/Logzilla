@@ -8,6 +8,7 @@ pub struct AudioParams {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct EndpointInfo {
     pub interface: u8,
     pub alt_setting: u8,

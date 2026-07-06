@@ -1,6 +1,7 @@
 use anyhow::{Result, anyhow};
 use crate::core::xcfg::types::{ConfigItem, ConfigValue, EntryType};
 
+#[allow(dead_code)]
 pub fn get_current_value(info_data: &[u8], item: &ConfigItem) -> Result<ConfigValue> {
     let off = item.offset as usize;
 
@@ -54,6 +55,7 @@ pub fn get_current_value(info_data: &[u8], item: &ConfigItem) -> Result<ConfigVa
     }
 }
 
+#[allow(dead_code)]
 fn read_raw(info_data: &[u8], item: &ConfigItem) -> Result<u32> {
     let off = item.offset as usize;
 

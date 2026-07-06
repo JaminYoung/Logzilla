@@ -349,7 +349,7 @@ fn try_parse_lmp(line: &str) -> Option<ParsedProtocol> {
     };
 
     let lower = after_ts.to_lowercase();
-    let (direction, rest) = if let Some(r) = lower.strip_prefix("lmp_rx") {
+    let (direction, _rest) = if let Some(r) = lower.strip_prefix("lmp_rx") {
         ("RX", r)
     } else if let Some(r) = lower.strip_prefix("lmp_tx") {
         ("TX", r)
@@ -452,7 +452,7 @@ fn try_parse_llcp(line: &str) -> Option<ParsedProtocol> {
     };
 
     let lower = after_ts.to_lowercase();
-    let (direction, rest) = if let Some(r) = lower.strip_prefix("ll_rx") {
+    let (direction, _rest) = if let Some(r) = lower.strip_prefix("ll_rx") {
         ("RX", r)
     } else if let Some(r) = lower.strip_prefix("ll_tx") {
         ("TX", r)

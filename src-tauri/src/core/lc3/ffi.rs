@@ -20,6 +20,7 @@ fn load_fn<T: Clone>(lib: &Library, name: &[u8]) -> Option<T> {
     unsafe { lib.get::<T>(name).ok().map(|s| (*s).clone()) }
 }
 
+#[allow(dead_code)]
 pub struct Lc3Library {
     _lib: Library,
     _has_hr: bool,
@@ -108,6 +109,7 @@ impl Lc3Library {
         }
     }
 
+    #[allow(dead_code)]
     pub fn delay_samples(&self, hrmode: bool, dt_us: i32, sr_hz: i32) -> i32 {
         unsafe {
             if let Some(f) = self.hr_delay_samples {

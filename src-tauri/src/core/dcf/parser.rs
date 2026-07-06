@@ -81,6 +81,7 @@ pub fn find_info_marker(data: &[u8]) -> Result<usize> {
     Err(anyhow!("INFO marker not found in DCF file"))
 }
 
+#[allow(dead_code)]
 pub fn read_info_data(data: &[u8], info_offset: usize, info_len: usize) -> Result<Vec<u8>> {
     let info_start = info_offset + 16;
     let info_end = info_start + info_len;

@@ -107,6 +107,7 @@ impl Lc3Decoder {
         Ok(pcm_buffer)
     }
 
+    #[allow(dead_code)]
     pub fn get_delay_samples(&self, hrmode: bool, dt_us: i32, sr_hz: i32) -> i32 {
         self.lib.delay_samples(hrmode, dt_us, sr_hz)
     }

@@ -15,6 +15,7 @@ pub struct IsoPacket {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct SetInterfaceEvent {
     pub timestamp: f64,
     pub interface: u8,

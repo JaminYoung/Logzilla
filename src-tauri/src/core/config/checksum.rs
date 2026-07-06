@@ -13,6 +13,7 @@ pub fn recalculate_checksum(dcf_data: &mut [u8], info_offset: usize, info_len: u
     dcf_data[info_offset + 15] = checksum;
 }
 
+#[allow(dead_code)]
 pub fn verify_checksum(dcf_data: &[u8], info_offset: usize, info_len: usize) -> bool {
     let info_start = info_offset + 16;
     let mut checksum: u8 = 0;

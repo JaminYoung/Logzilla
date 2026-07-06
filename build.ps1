@@ -218,40 +218,44 @@ if (-not (Confirm-Action "开始编译 Logzilla$(if($DebugBuild){' (debug)'}else
     exit 0
 }
 
-$buildArgs = @('run','tauri','--','build')
-if ($DebugBuild) { $buildArgs += '--DebugBuild' }
+$profile = if ($DebugBuild) { 'debug' } else { 'release' }
+$cargoFlag = if ($DebugBuild) { '' } else { '--release' }
 
-Write-Info "执行: npm $($buildArgs -join ' ')"
 $sw = [System.Diagnostics.Stopwatch]::StartNew()
-& npm @buildArgs
-$buildCode = $LASTEXITCODE
+
+# 步骤 1：构建前端
+Write-Head "2a/3 构建前端 (Vite + TypeScript)"
+Write-Info "执行: npm run build"
+& npm run build
+if ($LASTEXITCODE -ne 0) {
+    Write-Err "前端构建失败（退出码 $LASTEXITCODE）。"
+    exit $LASTEXITCODE
+}
+Write-Ok "前端构建完成"
+
+# 步骤 2：编译 Rust 后端（跳过 Tauri CLI 的打包步骤，避免下载 NSIS/WiX 超时）
+Write-Head "2b/3 编译后端 (Cargo)"
+$cargoArgs = @('build', '--manifest-path', (Join-Path $ProjectRoot 'src-tauri\Cargo.toml'))
+if ($cargoFlag) { $cargoArgs += $cargoFlag }
+Write-Info "执行: cargo $($cargoArgs -join ' ')"
+& cargo @cargoArgs
+$rustCode = $LASTEXITCODE
 $sw.Stop()
 
-if ($buildCode -ne 0) {
-    Write-Err "编译失败（退出码 $buildCode），用时 $([int]$sw.Elapsed.TotalSeconds)s。"
-    Write-Info "请检查上方 cargo / vite 的错误输出。"
-    exit $buildCode
+if ($rustCode -ne 0) {
+    Write-Err "Rust 编译失败（退出码 $rustCode），用时 $([int]$sw.Elapsed.TotalSeconds)s。"
+    Write-Info "请检查上方 cargo 的错误输出。"
+    exit $rustCode
 }
 
 # ------------------------------------------------------------------ 产物
 Write-Head "3/3 编译完成"
 Write-Ok "用时 $([int]$sw.Elapsed.TotalSeconds)s"
 
-$profile = if ($DebugBuild) { 'debug' } else { 'release' }
 $exe = Join-Path $ProjectRoot "src-tauri\target\$profile\logzilla.exe"
 if (Test-Path $exe) {
     Write-Host "`n  可执行文件：" -ForegroundColor Green
     Write-Host "    $exe" -ForegroundColor White
-}
-
-# 安装包（NSIS / MSI）—— tauri build 默认生成
-$bundleDir = Join-Path $ProjectRoot "src-tauri\target\$profile\bundle"
-if (Test-Path $bundleDir) {
-    $installers = Get-ChildItem -Path $bundleDir -Recurse -Include *.exe,*.msi -ErrorAction SilentlyContinue
-    if ($installers) {
-        Write-Host "`n  安装包：" -ForegroundColor Green
-        $installers | ForEach-Object { Write-Host "    $($_.FullName)" -ForegroundColor White }
-    }
 }
 
 Write-Host ""
