@@ -1,11 +1,26 @@
-use std::sync::{Arc, Mutex};
 use std::collections::HashMap;
+use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, Mutex};
 
-mod core;
 mod commands;
+mod core;
 
-use commands::{dcf_commands, serial_commands, config_commands, file_commands, hci_commands, live_import_commands, lc3_commands, usb_audio_commands, hci_parser_commands, search_commands};
 use crate::core::serial::port::SerialPortHandle;
+use commands::{
+    config_commands, dcf_commands, file_commands, hci_commands, hci_parser_commands, lc3_commands,
+    live_import_commands, search_commands, serial_commands, usb_audio_commands,
+};
+
+pub struct SerialReaderConfig {
+    pub timestamp_enabled: bool,
+    pub max_lines: usize,
+    pub panel: usize,
+}
+
+pub struct SerialReaderControl {
+    pub stop: Arc<AtomicBool>,
+    pub config: Arc<Mutex<SerialReaderConfig>>,
+}
 
 pub struct AppState {
     pub dcf_data: Mutex<Option<Vec<u8>>>,
@@ -15,6 +30,7 @@ pub struct AppState {
     pub info_offset: Mutex<usize>,
     pub info_len: Mutex<usize>,
     pub serial_ports: Mutex<HashMap<String, Arc<SerialPortHandle>>>,
+    pub serial_readers: Mutex<HashMap<String, SerialReaderControl>>,
     pub connected_ports: Mutex<Vec<String>>,
     pub lc3_capture_buffers: Mutex<HashMap<String, Vec<u8>>>,
     pub lc3_capture_active: Mutex<Vec<String>>,
@@ -22,11 +38,12 @@ pub struct AppState {
     pub logs2: Mutex<Vec<String>>,
     pub logs_version: Mutex<u64>,
     pub logs2_version: Mutex<u64>,
-    /// 已从缓冲区头部丢弃的行数（绝对游标基准）。前端用累计行号请求，
-    /// 后端用 `绝对行号 - base` 定位到当前缓冲区内的实际下标，避免裁剪后索引错乱。
+    /// Number of lines dropped from the front of each backend log buffer.
+    /// The frontend sends absolute line cursors; backend maps them with
+    /// `absolute_line - base` to locate the current buffer index.
     pub logs_base: Mutex<usize>,
     pub logs2_base: Mutex<usize>,
-    /// 每个串口的不完整行缓冲（跨次读取拼接）
+    /// Incomplete line buffers used by the legacy one-shot read command.
     pub partial_lines: Mutex<HashMap<String, String>>,
 }
 
@@ -40,6 +57,7 @@ impl Default for AppState {
             info_offset: Mutex::new(0),
             info_len: Mutex::new(0),
             serial_ports: Mutex::new(HashMap::new()),
+            serial_readers: Mutex::new(HashMap::new()),
             connected_ports: Mutex::new(Vec::new()),
             lc3_capture_buffers: Mutex::new(HashMap::new()),
             lc3_capture_active: Mutex::new(Vec::new()),
@@ -66,6 +84,8 @@ pub fn run() {
             serial_commands::open_serial_port,
             serial_commands::close_serial_port,
             serial_commands::send_serial_data,
+            serial_commands::start_serial_reader,
+            serial_commands::stop_serial_reader,
             serial_commands::read_serial_data,
             config_commands::apply_config_changes,
             file_commands::write_file,
@@ -107,18 +127,21 @@ mod tests {
         println!("DCF file size: {} bytes", data.len());
 
         let header = core::dcf::parser::parse_dcf(&data).expect("Failed to parse DCF header");
-        println!("Header: version={}, info_offset={}, info_len={}", 
-                 header.version, header.info_offset, header.info_len);
+        println!(
+            "Header: version={}, info_offset={}, info_len={}",
+            header.version, header.info_offset, header.info_len
+        );
 
         let info_offset = header.info_offset;
         let info_len = header.info_len as usize;
 
-        let (mut config_tree, _info_data) = core::xcfg::parser::parse_full_xcfg(&data, info_offset, info_len)
-            .expect("Failed to parse config tree");
-        
+        let (mut config_tree, _info_data) =
+            core::xcfg::parser::parse_full_xcfg(&data, info_offset, info_len)
+                .expect("Failed to parse config tree");
+
         // Assign offsets
         core::xcfg::offset::assign_offsets(&mut config_tree);
-        
+
         println!("\n=== Config Tree ===");
         print_config_tree(&config_tree, 0);
     }
@@ -143,8 +166,9 @@ mod tests {
                         Some(v) => format!("{:?}", v),
                         None => "None".to_string(),
                     };
-                    println!("{}{}: {} (var={}) val={} {} {}", 
-                        prefix, 
+                    println!(
+                        "{}{}: {} (var={}) val={} {} {}",
+                        prefix,
                         format!("{:?}", item.entry_type),
                         item.label_cn,
                         item.var_name,

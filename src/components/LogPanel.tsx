@@ -162,6 +162,7 @@ function DomLogList({
   const scrollableRef = useRef<HTMLDivElement>(null);
   const pendingRef = useRef<{ text: string; idx?: number }[]>([]);
   const prevLenRef = useRef(0);
+  const prevLinesRef = useRef<string[]>([]);
   const isAtBottomRef = useRef(true);
   const hlEnabledRef = useRef(hlEnabled);
   const hlRulesRef = useRef(hlRules);
@@ -263,13 +264,36 @@ function DomLogList({
       }));
       pendingRef.current.push(...mapped);
       prevLenRef.current = lines.length;
+      prevLinesRef.current = lines;
     } else if (lines.length < prevLenRef.current) {
       // Logs were cleared (or trimmed) — reset DOM and refs so new logs render correctly
       if (containerRef.current) containerRef.current.innerHTML = '';
       pendingRef.current = [];
       prevLenRef.current = 0;
       isAtBottomRef.current = true;
+      if (lines.length > 0) {
+        const idxArr = originalIndicesRef.current;
+        pendingRef.current.push(...lines.map((text, i) => ({
+          text,
+          idx: idxArr ? idxArr[i] : undefined,
+        })));
+        prevLenRef.current = lines.length;
+      }
+      prevLinesRef.current = lines;
     }
+  }, [lines]);
+
+  useEffect(() => {
+    if (lines === prevLinesRef.current || lines.length !== prevLenRef.current) return;
+    if (containerRef.current) containerRef.current.innerHTML = '';
+    pendingRef.current = [];
+    const idxArr = originalIndicesRef.current;
+    pendingRef.current.push(...lines.map((text, i) => ({
+      text,
+      idx: idxArr ? idxArr[i] : undefined,
+    })));
+    prevLinesRef.current = lines;
+    isAtBottomRef.current = true;
   }, [lines]);
 
   // Re-scan existing DOM for search match highlighting (batched for performance)

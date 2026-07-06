@@ -1,9 +1,12 @@
-use tauri::State;
-use serde::{Deserialize, Serialize};
-use std::sync::Arc;
-use crate::AppState;
 use crate::core::serial::port::SerialPortHandle;
+use crate::{AppState, SerialReaderConfig, SerialReaderControl};
 use chrono::Local;
+use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::thread;
+use std::time::Duration;
+use tauri::{Manager, State};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SerialPortInfo {
@@ -25,7 +28,8 @@ fn get_bluetooth_ports() -> Vec<String> {
         Err(_) => return Vec::new(),
     };
 
-    let bt_value_names: Vec<String> = key.enum_values()
+    let bt_value_names: Vec<String> = key
+        .enum_values()
         .filter_map(|r| r.ok())
         .filter(|(name, _)| name.to_uppercase().contains("BTH"))
         .map(|(name, _)| name)
@@ -42,10 +46,10 @@ fn get_bluetooth_ports() -> Vec<String> {
 
 #[cfg(target_os = "windows")]
 fn get_bluetooth_description(port_name: &str) -> Option<String> {
-    use winreg::enums::KEY_READ;
-    use winreg::enums::HKEY_LOCAL_MACHINE;
-    use winreg::RegKey;
     use std::path::Path;
+    use winreg::enums::HKEY_LOCAL_MACHINE;
+    use winreg::enums::KEY_READ;
+    use winreg::RegKey;
 
     let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
     let base_path = r"SYSTEM\CurrentControlSet\Enum\BTHENUM";
@@ -55,19 +59,28 @@ fn get_bluetooth_description(port_name: &str) -> Option<String> {
     };
 
     for dev_result in base_key.enum_keys() {
-        let dev = match dev_result { Ok(d) => d, _ => continue };
+        let dev = match dev_result {
+            Ok(d) => d,
+            _ => continue,
+        };
         let dev_key = match base_key.open_subkey_with_flags(&dev, KEY_READ) {
-            Ok(k) => k, _ => continue
+            Ok(k) => k,
+            _ => continue,
         };
         for inst_result in dev_key.enum_keys() {
-            let inst = match inst_result { Ok(i) => i, _ => continue };
-            let inst_path = Path::new(base_path).join(&dev).join(&inst);
-            let inst_key = match hklm.open_subkey_with_flags(
-                inst_path.to_str().unwrap(), KEY_READ
-            ) {
-                Ok(k) => k, _ => continue
+            let inst = match inst_result {
+                Ok(i) => i,
+                _ => continue,
             };
-            if let Ok(port_cfg) = inst_key.open_subkey_with_flags(r"Device Parameters\Port", KEY_READ) {
+            let inst_path = Path::new(base_path).join(&dev).join(&inst);
+            let inst_key = match hklm.open_subkey_with_flags(inst_path.to_str().unwrap(), KEY_READ)
+            {
+                Ok(k) => k,
+                _ => continue,
+            };
+            if let Ok(port_cfg) =
+                inst_key.open_subkey_with_flags(r"Device Parameters\Port", KEY_READ)
+            {
                 if let Ok(com) = port_cfg.get_value::<String, _>("COM") {
                     if com == port_name {
                         if let Ok(name) = inst_key.get_value::<String, _>("FriendlyName") {
@@ -93,8 +106,8 @@ fn get_bluetooth_description(_port_name: &str) -> Option<String> {
 
 #[tauri::command]
 pub fn list_serial_ports() -> Result<Vec<SerialPortInfo>, String> {
-    let ports = serialport::available_ports()
-        .map_err(|e| format!("Failed to list serial ports: {}", e))?;
+    let ports =
+        serialport::available_ports().map_err(|e| format!("Failed to list serial ports: {}", e))?;
 
     let bt_ports = get_bluetooth_ports();
     let mut result = Vec::new();
@@ -104,11 +117,14 @@ pub fn list_serial_ports() -> Result<Vec<SerialPortInfo>, String> {
                 Some(info.vid),
                 Some(info.pid),
                 "usb",
-                info.product.clone().or_else(|| info.manufacturer.clone()).unwrap_or_default(),
+                info.product
+                    .clone()
+                    .or_else(|| info.manufacturer.clone())
+                    .unwrap_or_default(),
             ),
             serialport::SerialPortType::BluetoothPort => {
                 (None, None, "bluetooth", "Bluetooth SPP".to_string())
-            },
+            }
             serialport::SerialPortType::PciPort => (None, None, "pci", String::new()),
             serialport::SerialPortType::Unknown => (None, None, "unknown", String::new()),
         };
@@ -129,6 +145,87 @@ pub fn list_serial_ports() -> Result<Vec<SerialPortInfo>, String> {
     }
 
     Ok(result)
+}
+
+fn append_log_lines(
+    state: &AppState,
+    panel: usize,
+    max_lines: usize,
+    new_lines: Vec<String>,
+) -> Result<(), String> {
+    if new_lines.is_empty() {
+        return Ok(());
+    }
+
+    let (mut logs, mut version) = if panel == 1 {
+        (
+            state.logs2.lock().map_err(|e| e.to_string())?,
+            state.logs2_version.lock().map_err(|e| e.to_string())?,
+        )
+    } else {
+        (
+            state.logs.lock().map_err(|e| e.to_string())?,
+            state.logs_version.lock().map_err(|e| e.to_string())?,
+        )
+    };
+
+    logs.extend(new_lines);
+
+    if logs.len() > max_lines {
+        let drain_count = logs.len() - max_lines;
+        logs.drain(0..drain_count);
+        let mut base = if panel == 1 {
+            state.logs2_base.lock().map_err(|e| e.to_string())?
+        } else {
+            state.logs_base.lock().map_err(|e| e.to_string())?
+        };
+        *base += drain_count;
+    }
+
+    *version += 1;
+    Ok(())
+}
+
+fn append_lc3_capture(state: &AppState, port: &str, buf: &[u8]) -> Result<(), String> {
+    let active = state.lc3_capture_active.lock().map_err(|e| e.to_string())?;
+    if active.contains(&port.to_string()) {
+        let mut buffers = state
+            .lc3_capture_buffers
+            .lock()
+            .map_err(|e| e.to_string())?;
+        if let Some(buffer) = buffers.get_mut(port) {
+            buffer.extend_from_slice(buf);
+        }
+    }
+    Ok(())
+}
+
+fn format_log_line(line: &[u8], timestamp: Option<&str>) -> Option<String> {
+    let mut end = line.len();
+    while end > 0 && line[end - 1] == b'\r' {
+        end -= 1;
+    }
+    if end == 0 {
+        return None;
+    }
+
+    let text = String::from_utf8_lossy(&line[..end]);
+    Some(match timestamp {
+        Some(ts) => format!("({}) {}", ts, text),
+        None => text.to_string(),
+    })
+}
+
+fn stop_serial_reader_inner(state: &AppState, port: &str) -> Result<(), String> {
+    if let Some(reader) = state
+        .serial_readers
+        .lock()
+        .map_err(|e| e.to_string())?
+        .remove(port)
+    {
+        reader.stop.store(true, Ordering::Relaxed);
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -155,10 +252,9 @@ pub fn open_serial_port(
 }
 
 #[tauri::command]
-pub fn close_serial_port(
-    port: String,
-    state: State<'_, AppState>,
-) -> Result<(), String> {
+pub fn close_serial_port(port: String, state: State<'_, AppState>) -> Result<(), String> {
+    stop_serial_reader_inner(&state, &port)?;
+
     let mut ports = state.serial_ports.lock().map_err(|e| e.to_string())?;
     ports.remove(&port);
 
@@ -169,16 +265,120 @@ pub fn close_serial_port(
 }
 
 #[tauri::command]
+pub fn start_serial_reader(
+    port: String,
+    timestamp_enabled: bool,
+    max_lines: usize,
+    panel: usize,
+    state: State<'_, AppState>,
+    app_handle: tauri::AppHandle,
+) -> Result<(), String> {
+    let serial_port = {
+        let ports = state.serial_ports.lock().map_err(|e| e.to_string())?;
+        ports
+            .get(&port)
+            .cloned()
+            .ok_or_else(|| format!("Port {} not found", port))?
+    };
+
+    let reader_config = SerialReaderConfig {
+        timestamp_enabled,
+        max_lines,
+        panel,
+    };
+
+    let mut readers = state.serial_readers.lock().map_err(|e| e.to_string())?;
+    if let Some(reader) = readers.get(&port) {
+        *reader.config.lock().map_err(|e| e.to_string())? = reader_config;
+        return Ok(());
+    }
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let config = Arc::new(std::sync::Mutex::new(reader_config));
+    readers.insert(
+        port.clone(),
+        SerialReaderControl {
+            stop: stop.clone(),
+            config: config.clone(),
+        },
+    );
+    drop(readers);
+
+    thread::Builder::new()
+        .name(format!("serial-reader-{}", port))
+        .spawn(move || {
+            let mut buf = vec![0u8; 4096];
+            let mut line_buf: Vec<u8> = Vec::with_capacity(256);
+            let mut line_timestamp: Option<String> = None;
+
+            while !stop.load(Ordering::Relaxed) {
+                let bytes_read = match serial_port.read(&mut buf) {
+                    Ok(n) => n,
+                    Err(_) => {
+                        thread::sleep(Duration::from_millis(2));
+                        continue;
+                    }
+                };
+
+                if bytes_read == 0 {
+                    continue;
+                }
+
+                let state = app_handle.state::<AppState>();
+                let _ = append_lc3_capture(&state, &port, &buf[..bytes_read]);
+
+                let mut completed_lines: Vec<String> = Vec::new();
+                for &byte in &buf[..bytes_read] {
+                    if byte == b'\n' {
+                        if let Some(line) = format_log_line(&line_buf, line_timestamp.as_deref()) {
+                            completed_lines.push(line);
+                        }
+                        line_buf.clear();
+                        line_timestamp = None;
+                        continue;
+                    }
+
+                    if line_buf.is_empty() {
+                        let cfg = config.lock().ok();
+                        line_timestamp = cfg
+                            .as_ref()
+                            .filter(|c| c.timestamp_enabled)
+                            .map(|_| Local::now().format("%H:%M:%S%.3f").to_string());
+                    }
+                    line_buf.push(byte);
+                }
+
+                if !completed_lines.is_empty() {
+                    if let Ok(cfg) = config.lock() {
+                        let state = app_handle.state::<AppState>();
+                        let _ = append_log_lines(&state, cfg.panel, cfg.max_lines, completed_lines);
+                    }
+                }
+            }
+        })
+        .map_err(|e| format!("Failed to start serial reader: {}", e))?;
+
+    Ok(())
+}
+
+#[tauri::command]
+pub fn stop_serial_reader(port: String, state: State<'_, AppState>) -> Result<(), String> {
+    stop_serial_reader_inner(&state, &port)
+}
+
+#[tauri::command]
 pub fn send_serial_data(
     port: String,
     data: Vec<u8>,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     let ports = state.serial_ports.lock().map_err(|e| e.to_string())?;
-    let serial_port = ports.get(&port)
+    let serial_port = ports
+        .get(&port)
         .ok_or_else(|| format!("Port {} not found", port))?;
 
-    serial_port.send(&data)
+    serial_port
+        .send(&data)
         .map_err(|e| format!("Failed to send data: {}", e))?;
 
     Ok(())
@@ -193,11 +393,20 @@ pub fn read_serial_data(
     state: State<'_, AppState>,
 ) -> Result<Vec<u8>, String> {
     let ports = state.serial_ports.lock().map_err(|e| e.to_string())?;
-    let serial_port = ports.get(&port)
+    let serial_port = ports
+        .get(&port)
         .ok_or_else(|| format!("Port {} not found", port))?;
 
+    let available = serial_port
+        .available()
+        .map_err(|e| format!("Failed to query data: {}", e))?;
+    if available == 0 {
+        return Ok(Vec::new());
+    }
+
     let mut buf = vec![0u8; 4096];
-    let bytes_read = serial_port.read(&mut buf)
+    let bytes_read = serial_port
+        .read(&mut buf)
         .map_err(|e| format!("Failed to read data: {}", e))?;
 
     buf.truncate(bytes_read);
@@ -221,8 +430,9 @@ pub fn read_serial_data(
         drop(partial_map);
 
         // 处理完整行（parts 中每个元素都以 \r 或 \n 结尾，或者空行）
-        let new_lines: Vec<String> = parts.iter()
-            .map(|l| l.trim_end_matches('\r'))  // 去掉 \r
+        let new_lines: Vec<String> = parts
+            .iter()
+            .map(|l| l.trim_end_matches('\r')) // 去掉 \r
             .filter(|l| !l.is_empty())
             .map(|l| {
                 if timestamp_enabled {
@@ -238,11 +448,15 @@ pub fn read_serial_data(
         if !new_lines.is_empty() {
             // 根据 panel 写入对应缓冲区
             let (mut logs, mut version) = if panel == 1 {
-                (state.logs2.lock().map_err(|e| e.to_string())?,
-                 state.logs2_version.lock().map_err(|e| e.to_string())?)
+                (
+                    state.logs2.lock().map_err(|e| e.to_string())?,
+                    state.logs2_version.lock().map_err(|e| e.to_string())?,
+                )
             } else {
-                (state.logs.lock().map_err(|e| e.to_string())?,
-                 state.logs_version.lock().map_err(|e| e.to_string())?)
+                (
+                    state.logs.lock().map_err(|e| e.to_string())?,
+                    state.logs_version.lock().map_err(|e| e.to_string())?,
+                )
             };
 
             logs.extend(new_lines);
@@ -267,7 +481,10 @@ pub fn read_serial_data(
         // LC3 捕获
         let active = state.lc3_capture_active.lock().map_err(|e| e.to_string())?;
         if active.contains(&port) {
-            let mut buffers = state.lc3_capture_buffers.lock().map_err(|e| e.to_string())?;
+            let mut buffers = state
+                .lc3_capture_buffers
+                .lock()
+                .map_err(|e| e.to_string())?;
             if let Some(buffer) = buffers.get_mut(&port) {
                 buffer.extend_from_slice(&buf);
             }

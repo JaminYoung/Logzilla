@@ -79,6 +79,32 @@ function getEarliestTimestamp(logs: string[]): Date | null {
   return null;
 }
 
+function isWindowMoving(): boolean {
+  return document.documentElement.getAttribute('data-window-moving') === 'true';
+}
+
+function matchesFilterRules(line: string, rules: FilterRule[]): boolean {
+  return rules.some(rule => {
+    try {
+      if (rule.matchType === 'regex') {
+        return new RegExp(rule.keyword).test(line);
+      }
+      return line.includes(rule.keyword);
+    } catch {
+      return false;
+    }
+  });
+}
+
+function getFilteredLogsForSearch(logs: string[], enabled: boolean, rules: FilterRule[]): string[] {
+  if (!enabled || rules.length === 0) return [];
+  return logs.filter(line => matchesFilterRules(line, rules));
+}
+
+function keepTail<T>(items: T[], maxItems: number): T[] {
+  return items.length > maxItems ? items.slice(items.length - maxItems) : items;
+}
+
 export default function App() {
   const searchParams = new URLSearchParams(window.location.search);
   if (searchParams.get('view') === 'lc3') {
@@ -145,6 +171,8 @@ export default function App() {
 
   const autoSavePathRef = useRef('');
   const autoSavePathRef2 = useRef('');
+  const panel0PortConnected = Boolean(logDisplayPort && connectedPorts.includes(logDisplayPort));
+  const panel1PortConnected = Boolean(logDisplayPort2 && connectedPorts.includes(logDisplayPort2));
 
   const showToast = (message: string, durationMs = 2000) => {
     const id = crypto.randomUUID();
@@ -266,35 +294,51 @@ export default function App() {
   // Serial data buffer for proper line handling
   // (不再需要，后端处理时间戳和日志存储)
 
-  // Poll serial data from selected port only
+  // Start/stop backend serial reader for panel 0.
   useEffect(() => {
-    if (!logDisplayPort || !connectedPorts.includes(logDisplayPort)) return;
+    if (!logDisplayPort || !panel0PortConnected) return;
 
-    let isActive = true;
-    let pollTimeout: ReturnType<typeof setTimeout> | null = null;
-
-    const poll = async () => {
-      if (!isActive) return;
+    const startReader = async () => {
       try {
         const { invoke } = await import('@tauri-apps/api/core');
-        // 后端读取串口数据，添加时间戳，存储到 AppState
-        await invoke<number[]>('read_serial_data', {
+        await invoke('start_serial_reader', {
           port: logDisplayPort,
-          timestampEnabled: timestampEnabled,
-          maxLines: maxLines,
+          timestampEnabled,
+          maxLines,
           panel: 0
         });
-      } catch (e) { /* timeout is normal */ }
-      if (isActive) pollTimeout = setTimeout(poll, pollIntervalMs);
+      } catch (e) {
+        console.error('Start serial reader error:', e);
+      }
     };
-
-    pollTimeout = setTimeout(poll, pollIntervalMs);
+    startReader();
 
     return () => {
-      isActive = false;
-      if (pollTimeout) clearTimeout(pollTimeout);
+      import('@tauri-apps/api/core')
+        .then(({ invoke }) => invoke('stop_serial_reader', { port: logDisplayPort }))
+        .catch(() => {});
     };
-  }, [logDisplayPort, connectedPorts, timestampEnabled, maxLines, pollIntervalMs]);
+  }, [logDisplayPort, panel0PortConnected]);
+
+  // Update backend reader config for panel 0 without restarting the thread.
+  useEffect(() => {
+    if (!logDisplayPort || !panel0PortConnected) return;
+
+    const updateReader = async () => {
+      try {
+        const { invoke } = await import('@tauri-apps/api/core');
+        await invoke('start_serial_reader', {
+          port: logDisplayPort,
+          timestampEnabled,
+          maxLines,
+          panel: 0
+        });
+      } catch (e) {
+        console.error('Update serial reader error:', e);
+      }
+    };
+    updateReader();
+  }, [logDisplayPort, panel0PortConnected, timestampEnabled, maxLines]);
 
   // 从后端获取日志用于显示（面板0）
   useEffect(() => {
@@ -303,9 +347,13 @@ export default function App() {
 
     const fetchLogs = async () => {
       if (!isActive) return;
+      if (isWindowMoving()) {
+        timer = setTimeout(fetchLogs, Math.max(120, pollIntervalMs));
+        return;
+      }
       try {
         const { invoke } = await import('@tauri-apps/api/core');
-        const [newLogs, newVersion] = await invoke<[string[], number]>('get_logs', {
+        const [newLogs, newVersion, nextKnownLines] = await invoke<[string[], number, number]>('get_logs', {
           panel: 0,
           sinceVersion: logsVersionRef.current,
           knownLines: logsLenRef.current
@@ -313,9 +361,9 @@ export default function App() {
 
         if (newVersion > logsVersionRef.current) {
           logsVersionRef.current = newVersion;
+          logsLenRef.current = nextKnownLines;
           if (newLogs.length > 0) {
-            logsLenRef.current += newLogs.length;
-            setLogs(prev => [...prev, ...newLogs]);
+            setLogs(prev => keepTail([...prev, ...newLogs], maxLines));
           }
         }
       } catch (e) {
@@ -329,7 +377,7 @@ export default function App() {
 
     fetchLogs();
     return () => { isActive = false; if (timer) clearTimeout(timer); };
-  }, [pollIntervalMs]);
+  }, [pollIntervalMs, maxLines]);
 
   // 从后端获取日志用于显示（面板1）
   useEffect(() => {
@@ -339,9 +387,13 @@ export default function App() {
 
     const fetchLogs2 = async () => {
       if (!isActive) return;
+      if (isWindowMoving()) {
+        timer = setTimeout(fetchLogs2, Math.max(120, pollIntervalMs));
+        return;
+      }
       try {
         const { invoke } = await import('@tauri-apps/api/core');
-        const [newLogs, newVersion] = await invoke<[string[], number]>('get_logs', {
+        const [newLogs, newVersion, nextKnownLines] = await invoke<[string[], number, number]>('get_logs', {
           panel: 1,
           sinceVersion: logs2VersionRef.current,
           knownLines: logs2LenRef.current
@@ -349,9 +401,9 @@ export default function App() {
 
         if (newVersion > logs2VersionRef.current) {
           logs2VersionRef.current = newVersion;
+          logs2LenRef.current = nextKnownLines;
           if (newLogs.length > 0) {
-            logs2LenRef.current += newLogs.length;
-            setLogs2(prev => [...prev, ...newLogs]);
+            setLogs2(prev => keepTail([...prev, ...newLogs], maxLines));
           }
         }
       } catch (e) {
@@ -365,36 +417,53 @@ export default function App() {
 
     fetchLogs2();
     return () => { isActive = false; if (timer) clearTimeout(timer); };
-  }, [dualPanelMode, pollIntervalMs]);
+  }, [dualPanelMode, pollIntervalMs, maxLines]);
 
-  // Poll serial data for second panel
+  // Start/stop backend serial reader for panel 1.
   useEffect(() => {
-    if (!logDisplayPort2 || !connectedPorts.includes(logDisplayPort2)) return;
+    if (!logDisplayPort2 || !panel1PortConnected) return;
 
-    let isActive = true;
-    let pollTimeout: ReturnType<typeof setTimeout> | null = null;
-
-    const poll = async () => {
-      if (!isActive) return;
+    const startReader = async () => {
       try {
         const { invoke } = await import('@tauri-apps/api/core');
-        await invoke<number[]>('read_serial_data', {
+        await invoke('start_serial_reader', {
           port: logDisplayPort2,
-          timestampEnabled: timestampEnabled,
-          maxLines: maxLines,
+          timestampEnabled,
+          maxLines,
           panel: 1
         });
-      } catch (e) { /* timeout is normal */ }
-      if (isActive) pollTimeout = setTimeout(poll, pollIntervalMs);
+      } catch (e) {
+        console.error('Start serial reader2 error:', e);
+      }
     };
-
-    pollTimeout = setTimeout(poll, pollIntervalMs);
+    startReader();
 
     return () => {
-      isActive = false;
-      if (pollTimeout) clearTimeout(pollTimeout);
+      import('@tauri-apps/api/core')
+        .then(({ invoke }) => invoke('stop_serial_reader', { port: logDisplayPort2 }))
+        .catch(() => {});
     };
-  }, [logDisplayPort2, connectedPorts, timestampEnabled, maxLines, pollIntervalMs]);
+  }, [logDisplayPort2, panel1PortConnected]);
+
+  // Update backend reader config for panel 1 without restarting the thread.
+  useEffect(() => {
+    if (!logDisplayPort2 || !panel1PortConnected) return;
+
+    const updateReader = async () => {
+      try {
+        const { invoke } = await import('@tauri-apps/api/core');
+        await invoke('start_serial_reader', {
+          port: logDisplayPort2,
+          timestampEnabled,
+          maxLines,
+          panel: 1
+        });
+      } catch (e) {
+        console.error('Update serial reader2 error:', e);
+      }
+    };
+    updateReader();
+  }, [logDisplayPort2, panel1PortConnected, timestampEnabled, maxLines]);
 
   // Live Import HCI sending
   const liveImportIndexRef = useRef(0);
@@ -1064,16 +1133,14 @@ export default function App() {
 
   // Helper: get lines for a specific view
   const getLinesForView = useCallback((viewId: string): string[] => {
-    const isPanel1 = viewId === 'view2' || viewId === 'view3';
-    
-    // Note: view1 and view3 are filter views, using original logs for now
-    // Filter logic is handled in LogPanel component
-    if (isPanel1) {
-      return logs2;
-    } else {
-      return logs;
+    if (viewId === 'view1') {
+      return getFilteredLogsForSearch(logs, filterEnabled, filterRules);
     }
-  }, [logs, logs2]);
+    if (viewId === 'view3') {
+      return getFilteredLogsForSearch(logs2, filterEnabled, filterRules);
+    }
+    return viewId === 'view2' ? logs2 : logs;
+  }, [logs, logs2, filterEnabled, filterRules]);
 
   // Listen for LC3 window port changes (auto-update connected ports in main window)
   useEffect(() => {
@@ -1104,9 +1171,9 @@ export default function App() {
       // Get selected views
       const selectedViews: string[] = [];
       if (searchScope.view0) selectedViews.push('view0');
-      if (searchScope.view1) selectedViews.push('view1');
+      if (searchScope.view1 && filterEnabled && filterRules.length > 0) selectedViews.push('view1');
       if (searchScope.view2) selectedViews.push('view2');
-      if (searchScope.view3) selectedViews.push('view3');
+      if (searchScope.view3 && filterEnabled && filterRules.length > 0) selectedViews.push('view3');
       
       // Build view lines
       const viewLines = selectedViews.map(viewId => ({
@@ -1141,17 +1208,16 @@ export default function App() {
   }, [searchQuery, searchMode, searchCaseSensitive, searchScope, searchVisible, handleSearch]);
 
   // Auto-update search results when logs change
-  const logsLen = logs.length;
-  const logs2Len = logs2.length;
   useEffect(() => {
     if (!searchVisible || !searchQuery) return;
     handleSearch(searchQuery, searchMode, searchCaseSensitive);
-  }, [logsLen, logs2Len]);
+  }, [logs, logs2, searchVisible, searchQuery, searchMode, searchCaseSensitive, handleSearch]);
 
   // Use ref so handleSearchNavigate always reads the latest searchResult
   // (avoids stale-closure issues between useCallback and useEffect)
   const searchResultRef = useRef(searchResult);
   searchResultRef.current = searchResult;
+  const searchNavigateRetryRef = useRef(0);
 
   const handleSearchNavigate = useCallback((index: number) => {
     setSearchCurrentIndex(index);
@@ -1174,7 +1240,19 @@ export default function App() {
     if (!logContainer) return;
     const lineDivs = logContainer.querySelectorAll(':scope > div');
     const target = lineDivs[lineIndex] as HTMLElement | undefined;
-    if (!target) return;
+    if (!target) {
+      if (searchNavigateRetryRef.current >= 10) {
+        searchNavigateRetryRef.current = 0;
+        return;
+      }
+      searchNavigateRetryRef.current += 1;
+      requestAnimationFrame(() => {
+        const current = searchResultRef.current;
+        if (current?.matches?.[index] === match) handleSearchNavigate(index);
+      });
+      return;
+    }
+    searchNavigateRetryRef.current = 0;
 
     // Highlight
     document.querySelectorAll('.search-current').forEach(el => el.classList.remove('search-current'));
