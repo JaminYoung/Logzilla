@@ -3,7 +3,7 @@ use super::hci_evt_table;
 use super::le_subevt_table;
 use super::llcp_table;
 use super::lmp_table;
-use super::types::{ParsedProtocol, ParamType, ProtocolField};
+use super::types::{ParamType, ParsedProtocol, ProtocolField};
 
 pub fn parse_line(line: &str) -> ParsedProtocol {
     let line = line.trim();
@@ -139,6 +139,15 @@ fn parse_hci_cmd(data: &[u8]) -> Option<ParsedProtocol> {
                 fields.extend(ad_fields);
             }
         }
+    } else if ogf == 0x08 && ocf == 0x003F && data.len() > 6 {
+        // LE_Set_Periodic_Advertising_Data: skip handle(1) + op(1) + length(1).
+        let ad_len = data[5] as usize;
+        let ad_start = 6;
+        let ad_data = &data[ad_start..std::cmp::min(ad_start + ad_len, data.len())];
+        let ad_fields = parse_ad_structures(ad_data);
+        if !ad_fields.is_empty() {
+            fields.extend(ad_fields);
+        }
     }
 
     Some(ParsedProtocol {
@@ -168,8 +177,14 @@ fn parse_ad_structures(data: &[u8]) -> Vec<ProtocolField> {
 
         let (type_name, value_str) = match ad_type {
             0x01 => ("Flags".to_string(), format_flags(ad_data)),
-            0x02 => ("Incomplete_16bit_UUIDs".to_string(), format_uuid16_list(ad_data)),
-            0x03 => ("Complete_16bit_UUIDs".to_string(), format_uuid16_list(ad_data)),
+            0x02 => (
+                "Incomplete_16bit_UUIDs".to_string(),
+                format_uuid16_list(ad_data),
+            ),
+            0x03 => (
+                "Complete_16bit_UUIDs".to_string(),
+                format_uuid16_list(ad_data),
+            ),
             0x04 => ("Incomplete_32bit_UUIDs".to_string(), format_hex(ad_data)),
             0x05 => ("Complete_32bit_UUIDs".to_string(), format_hex(ad_data)),
             0x06 => ("Incomplete_128bit_UUIDs".to_string(), format_hex(ad_data)),
@@ -184,14 +199,19 @@ fn parse_ad_structures(data: &[u8]) -> Vec<ProtocolField> {
             }
             0x0A => {
                 if !ad_data.is_empty() {
-                    ("TX_Power_Level".to_string(), format!("{} dBm", ad_data[0] as i8))
+                    (
+                        "TX_Power_Level".to_string(),
+                        format!("{} dBm", ad_data[0] as i8),
+                    )
                 } else {
                     ("TX_Power_Level".to_string(), String::new())
                 }
             }
             0x0D => {
                 if ad_data.len() >= 3 {
-                    let class = (ad_data[0] as u32) | ((ad_data[1] as u32) << 8) | ((ad_data[2] as u32) << 16);
+                    let class = (ad_data[0] as u32)
+                        | ((ad_data[1] as u32) << 8)
+                        | ((ad_data[2] as u32) << 16);
                     ("Class_of_Device".to_string(), format!("0x{:06X}", class))
                 } else {
                     ("Class_of_Device".to_string(), format_hex(ad_data))
@@ -210,11 +230,21 @@ fn parse_ad_structures(data: &[u8]) -> Vec<ProtocolField> {
             }
             0x20 => ("Service_Data_32bit_UUID".to_string(), format_hex(ad_data)),
             0x21 => ("Service_Data_128bit_UUID".to_string(), format_hex(ad_data)),
-            0x24 => ("URI".to_string(), String::from_utf8_lossy(ad_data).to_string()),
+            0x24 => (
+                "URI".to_string(),
+                String::from_utf8_lossy(ad_data).to_string(),
+            ),
             0xFF => {
                 if ad_data.len() >= 2 {
                     let company = u16::from_le_bytes([ad_data[0], ad_data[1]]);
-                    ("Manufacturer_Specific".to_string(), format!("Company=0x{:04X}, Data={}", company, format_hex(&ad_data[2..])))
+                    (
+                        "Manufacturer_Specific".to_string(),
+                        format!(
+                            "Company=0x{:04X}, Data={}",
+                            company,
+                            format_hex(&ad_data[2..])
+                        ),
+                    )
                 } else {
                     ("Manufacturer_Specific".to_string(), format_hex(ad_data))
                 }
@@ -233,14 +263,26 @@ fn parse_ad_structures(data: &[u8]) -> Vec<ProtocolField> {
 }
 
 fn format_flags(data: &[u8]) -> String {
-    if data.is_empty() { return String::new(); }
+    if data.is_empty() {
+        return String::new();
+    }
     let flags = data[0];
     let mut parts = Vec::new();
-    if flags & 0x01 != 0 { parts.push("LE_Limited_Disc"); }
-    if flags & 0x02 != 0 { parts.push("LE_General_Disc"); }
-    if flags & 0x04 != 0 { parts.push("BR/EDR_Not_Supported"); }
-    if flags & 0x08 != 0 { parts.push("LE+BR/EDR_Controller"); }
-    if flags & 0x10 != 0 { parts.push("LE+BR/EDR_Host"); }
+    if flags & 0x01 != 0 {
+        parts.push("LE_Limited_Disc");
+    }
+    if flags & 0x02 != 0 {
+        parts.push("LE_General_Disc");
+    }
+    if flags & 0x04 != 0 {
+        parts.push("BR/EDR_Not_Supported");
+    }
+    if flags & 0x08 != 0 {
+        parts.push("LE+BR/EDR_Controller");
+    }
+    if flags & 0x10 != 0 {
+        parts.push("LE+BR/EDR_Host");
+    }
     format!("0x{:02X} ({})", flags, parts.join(", "))
 }
 
@@ -271,9 +313,10 @@ fn parse_hci_evt(data: &[u8]) -> Option<ParsedProtocol> {
             .map(|d| d.name.to_string())
             .unwrap_or_else(|| format!("Unknown_LE_Subevent"));
 
-        let mut fields = vec![
-            ProtocolField { name: "Subevent_Code".to_string(), value: format!("0x{:02X}", subevent_code) },
-        ];
+        let mut fields = vec![ProtocolField {
+            name: "Subevent_Code".to_string(),
+            value: format!("0x{:02X}", subevent_code),
+        }];
 
         // Subevent parameters start after Subevent_Code: data[3..]
         if let Some(def) = sub_def {
@@ -314,19 +357,25 @@ fn parse_hci_evt(data: &[u8]) -> Option<ParsedProtocol> {
         vec![]
     };
 
-    // For Command Complete (0x0E) and Command Status (0x0F), resolve the command opcode to name
-    // Num_HCI_Command_Packets(1) at data[2], Command_Opcode(2) at data[3..4]
-    if (code == 0x0E || code == 0x0F) && data.len() >= 5 {
-        let cmd_opcode = u16::from_le_bytes([data[3], data[4]]);
+    let cmd_opcode_offset = match code {
+        0x0E if data.len() >= 5 => Some(3),
+        0x0F if data.len() >= 6 => Some(4),
+        _ => None,
+    };
+    if let Some(offset) = cmd_opcode_offset {
+        let cmd_opcode = u16::from_le_bytes([data[offset], data[offset + 1]]);
         let ogf = (cmd_opcode >> 10) as u8;
         let ocf = cmd_opcode & 0x03FF;
         let cmd_name = hci_cmd_table::lookup(ogf, ocf)
             .map(|d| d.name.to_string())
             .unwrap_or_else(|| format!("Unknown_CMD(0x{:04X})", cmd_opcode));
-        fields.insert(2, ProtocolField {
-            name: "Command".to_string(),
-            value: format!("{} (OGF=0x{:02X}, OCF=0x{:04X})", cmd_name, ogf, ocf),
-        });
+        fields.insert(
+            2,
+            ProtocolField {
+                name: "Command".to_string(),
+                value: format!("{} (OGF=0x{:02X}, OCF=0x{:04X})", cmd_name, ogf, ocf),
+            },
+        );
     }
 
     Some(ParsedProtocol {
@@ -386,7 +435,11 @@ fn try_parse_lmp(line: &str) -> Option<ParsedProtocol> {
         (opcode_or_escape, 1, false)
     };
 
-    let def = lmp_table::lookup(opcode);
+    let def = if is_extended {
+        lmp_table::lookup_ext(opcode)
+    } else {
+        lmp_table::lookup(opcode)
+    };
     let name = def
         .map(|d| d.name.to_string())
         .unwrap_or_else(|| format!("Unknown_LMP"));
@@ -410,8 +463,8 @@ fn try_parse_lmp(line: &str) -> Option<ParsedProtocol> {
         });
     }
 
-    // Special: LMP_accepted (opcode 3) and LMP_not_accepted (opcode 4) — resolve accepted opcode name
-    if opcode == 3 && data.len() > param_start {
+    // Resolve accepted/rejected opcode names for quick inspection.
+    if !is_extended && opcode == 3 && data.len() > param_start {
         let accepted_opcode = data[param_start];
         let accepted_name = lmp_table::lookup(accepted_opcode)
             .map(|d| d.name.to_string())
@@ -421,7 +474,7 @@ fn try_parse_lmp(line: &str) -> Option<ParsedProtocol> {
             value: format!("{} (0x{:02X})", accepted_name, accepted_opcode),
         });
     }
-    if opcode == 4 && data.len() > param_start {
+    if !is_extended && opcode == 4 && data.len() > param_start {
         let rejected_opcode = data[param_start];
         let rejected_name = lmp_table::lookup(rejected_opcode)
             .map(|d| d.name.to_string())
@@ -431,11 +484,31 @@ fn try_parse_lmp(line: &str) -> Option<ParsedProtocol> {
             value: format!("{} (0x{:02X})", rejected_name, rejected_opcode),
         });
     }
+    if is_extended && (opcode == 1 || opcode == 2) && data.len() > param_start {
+        let escaped_opcode = data[param_start];
+        let escaped_name = lmp_table::lookup_ext(escaped_opcode)
+            .map(|d| d.name.to_string())
+            .unwrap_or_else(|| format!("Unknown_Ext(0x{:02X})", escaped_opcode));
+        fields.push(ProtocolField {
+            name: if opcode == 1 {
+                "Accepted_Ext_Opcode"
+            } else {
+                "Rejected_Ext_Opcode"
+            }
+            .to_string(),
+            value: format!("{} (0x{:02X})", escaped_name, escaped_opcode),
+        });
+    }
 
     Some(ParsedProtocol {
         protocol: "LMP".to_string(),
         name,
-        opcode_info: format!("Opcode: 0x{:02X}, Direction: {}{}", opcode, direction, if is_extended { " (extended)" } else { "" }),
+        opcode_info: format!(
+            "Opcode: 0x{:02X}, Direction: {}{}",
+            opcode,
+            direction,
+            if is_extended { " (extended)" } else { "" }
+        ),
         recognized: def.is_some(),
         fields,
     })
@@ -507,7 +580,11 @@ fn try_parse_llcp(line: &str) -> Option<ParsedProtocol> {
     })
 }
 
-fn parse_fields(data: &[u8], params: &[(&str, ParamType)], recognized: bool) -> Vec<ProtocolField> {
+fn parse_fields(
+    data: &[u8],
+    params: &[(&str, ParamType)],
+    _recognized: bool,
+) -> Vec<ProtocolField> {
     let mut fields = Vec::new();
     let mut offset = 0;
 
@@ -565,11 +642,7 @@ fn parse_fields(data: &[u8], params: &[(&str, ParamType)], recognized: bool) -> 
                 )
             }
             ParamType::Bytes(n) => {
-                let len = if *n == 0 {
-                    data.len() - offset
-                } else {
-                    *n
-                };
+                let len = if *n == 0 { data.len() - offset } else { *n };
                 if offset + len > data.len() {
                     break;
                 }
@@ -584,8 +657,8 @@ fn parse_fields(data: &[u8], params: &[(&str, ParamType)], recognized: bool) -> 
         offset += consumed;
     }
 
-    // Only show remaining data for unrecognized protocols
-    if offset < data.len() && !recognized {
+    // Keep variable-length tails visible for recognized commands/events too.
+    if offset < data.len() {
         fields.push(ProtocolField {
             name: "Remaining".to_string(),
             value: format_hex(&data[offset..]),
@@ -611,4 +684,50 @@ fn format_hex(data: &[u8]) -> String {
         .map(|b| format!("{:02X}", b))
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_line;
+
+    #[test]
+    fn parses_corrected_le_extended_advertising_command_ocf() {
+        let parsed = parse_line(
+            "[0] CMD => 36 20 19 01 13 00 A0 00 00 A0 00 00 07 00 00 00 00 00 00 00 00 00 7F 01 00 01 00",
+        );
+
+        assert_eq!(parsed.protocol, "HCI CMD");
+        assert_eq!(parsed.name, "LE_Set_Extended_Advertising_Parameters");
+        assert_eq!(parsed.opcode_info, "OGF=0x08, OCF=0x0036");
+    }
+
+    #[test]
+    fn command_status_resolves_opcode_after_status_and_ncmd() {
+        let parsed = parse_line("[0] EVT <= 0F 04 00 01 36 20");
+
+        assert_eq!(parsed.name, "Command_Status");
+        assert!(parsed
+            .fields
+            .iter()
+            .any(|f| f.name == "Command"
+                && f.value.contains("LE_Set_Extended_Advertising_Parameters")));
+    }
+
+    #[test]
+    fn parses_new_llcp_subrate_opcode() {
+        let parsed = parse_line("ll_rx0: 26 01 00 02 00 03 00 04 00 05 00");
+
+        assert_eq!(parsed.protocol, "LLCP");
+        assert_eq!(parsed.name, "LL_SUBRATE_REQ");
+        assert!(parsed.recognized);
+    }
+
+    #[test]
+    fn parses_lmp_escaped_opcode_table() {
+        let parsed = parse_line("lmp_tx0: FE 03 01");
+
+        assert_eq!(parsed.protocol, "LMP");
+        assert_eq!(parsed.name, "LMP_packet_type_table_req");
+        assert!(parsed.opcode_info.contains("(extended)"));
+    }
 }
