@@ -22,6 +22,9 @@
 .PARAMETER Debug
     编译 debug 版本（默认编译 release 版本）。
 
+.PARAMETER Arch
+    目标架构：x86_64 或 i686（默认 i686，32 位）。
+
 .EXAMPLE
     .\build.ps1
     交互式：检测依赖 → 缺失时询问是否安装 → 编译 release exe
@@ -35,7 +38,8 @@
 param(
     [switch]$Yes,
     [switch]$SkipDeps,
-    [switch]$DebugBuild
+    [switch]$DebugBuild,
+    [ValidateSet('x86_64','i686')][string]$Arch = 'i686'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -218,6 +222,7 @@ if (-not (Confirm-Action "开始编译 Logzilla$(if($DebugBuild){' (debug)'}else
     exit 0
 }
 
+$target = if ($Arch -eq 'i686') { 'i686-pc-windows-msvc' } else { 'x86_64-pc-windows-msvc' }
 $profile = if ($DebugBuild) { 'debug' } else { 'release' }
 $cargoFlag = if ($DebugBuild) { '' } else { '--release' }
 
@@ -235,7 +240,7 @@ Write-Ok "前端构建完成"
 
 # 步骤 2：编译 Rust 后端（跳过 Tauri CLI 的打包步骤，避免下载 NSIS/WiX 超时）
 Write-Head "2b/3 编译后端 (Cargo)"
-$cargoArgs = @('build', '--manifest-path', (Join-Path $ProjectRoot 'src-tauri\Cargo.toml'))
+$cargoArgs = @('build', '--target', $target, '--manifest-path', (Join-Path $ProjectRoot 'src-tauri\Cargo.toml'))
 if ($cargoFlag) { $cargoArgs += $cargoFlag }
 Write-Info "执行: cargo $($cargoArgs -join ' ')"
 & cargo @cargoArgs
@@ -252,7 +257,7 @@ if ($rustCode -ne 0) {
 Write-Head "3/3 编译完成"
 Write-Ok "用时 $([int]$sw.Elapsed.TotalSeconds)s"
 
-$exe = Join-Path $ProjectRoot "src-tauri\target\$profile\logzilla.exe"
+$exe = Join-Path $ProjectRoot "src-tauri\target\$target\$profile\logzilla.exe"
 if (Test-Path $exe) {
     Write-Host "`n  可执行文件：" -ForegroundColor Green
     Write-Host "    $exe" -ForegroundColor White
