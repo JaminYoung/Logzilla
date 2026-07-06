@@ -1351,6 +1351,9 @@ export default function App() {
         resizable: false,
         center: true,
       });
+      void win.setIcon('/logo.png').catch((e) => {
+        console.error('LC3 window icon error:', e);
+      });
       win.once('tauri://error', (e) => {
         console.error('LC3 window error:', e);
         showToast('打开 LC3 窗口失败');

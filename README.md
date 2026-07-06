@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="src-tauri/icons/icon.svg" width="120" alt="Logzilla logo" />
+<img src="src-tauri/icons/icon.png" width="120" alt="Logzilla logo" />
 
 # Logzilla
 

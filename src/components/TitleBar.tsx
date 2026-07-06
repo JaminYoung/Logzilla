@@ -32,6 +32,9 @@ export function TitleBar() {
       try {
         const { getCurrentWindow } = await import('@tauri-apps/api/window');
         const window = getCurrentWindow();
+        void window.setIcon('/logo.png').catch((e) => {
+          console.error('Main window icon error:', e);
+        });
         const maximized = await window.isMaximized();
         if (!cancelled) setIsMaximized(maximized);
 
@@ -107,7 +110,7 @@ export function TitleBar() {
     >
       {/* Left - App Name & Icon */}
       <div className="flex items-center gap-2 pl-4" data-tauri-drag-region>
-        <img src="/logo.svg" alt="Logzilla" className="w-8 h-8 select-none pointer-events-none" data-tauri-drag-region />
+        <img src="/logo.png" alt="Logzilla" className="w-8 h-8 select-none pointer-events-none" data-tauri-drag-region />
         <span className="font-semibold" data-tauri-drag-region>Logzilla</span>
       </div>
 
