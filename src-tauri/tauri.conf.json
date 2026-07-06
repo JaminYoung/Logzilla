@@ -1,7 +1,7 @@
 {
   "$schema": "https://raw.githubusercontent.com/nicholasq/tauri-schema/v3/tauri.schema.json",
   "productName": "Logzilla",
-  "version": "0.1.0",
+  "version": "0.0.1",
   "identifier": "com.logzilla.app",
   "build": {
     "frontendDist": "../dist",
