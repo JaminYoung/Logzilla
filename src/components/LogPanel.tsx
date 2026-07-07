@@ -122,6 +122,10 @@ function createHighlightedFragment(text: string, rules: HighlightRule[]): Docume
   return frag;
 }
 
+function fontSizeToRem(size: 'xs' | 'sm' | 'base'): string {
+  return size === 'xs' ? '0.75rem' : size === 'sm' ? '0.875rem' : '1rem';
+}
+
 interface DomLogListProps {
   lines: string[];
   emptyMessage: string;
@@ -208,8 +212,7 @@ function DomLogList({
             if (idx !== undefined) div.dataset.originalIndex = String(idx);
             const span = document.createElement('span');
             span.className = 'select-text break-all';
-            const fs = fontSizeRef.current;
-            span.style.fontSize = fs === 'xs' ? '0.75rem' : fs === 'sm' ? '0.875rem' : '1rem';
+            span.style.fontSize = fontSizeToRem(fontSizeRef.current);
             if (doHighlight) {
               const fragHL = createHighlightedFragment(text, hlRulesRef.current);
               if (fragHL) {
@@ -295,6 +298,16 @@ function DomLogList({
     prevLinesRef.current = lines;
     isAtBottomRef.current = true;
   }, [lines]);
+
+  useEffect(() => {
+    if (!containerRef.current) return;
+    const size = fontSizeToRem(fontSize);
+    containerRef.current
+      .querySelectorAll<HTMLSpanElement>(':scope > div > span')
+      .forEach(span => {
+        span.style.fontSize = size;
+      });
+  }, [fontSize]);
 
   // Re-scan existing DOM for search match highlighting (batched for performance)
   useEffect(() => {

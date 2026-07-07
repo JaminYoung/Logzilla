@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo, type MouseEvent as ReactMouseEvent } from 'react';
 import { TitleBar } from './components/TitleBar';
 import { SecondaryToolbar } from './components/SecondaryToolbar';
 import { useWindowMoving } from './hooks/useWindowMoving';
@@ -130,6 +130,7 @@ export default function App() {
   const [menuOpen, setMenuOpen] = useState(false);
   const [configPanelOpen, setConfigPanelOpen] = useState(false);
   const [dualPanelMode, setDualPanelMode] = useState(false);
+  const [dualPanelRatio, setDualPanelRatio] = useState(0.5);
   const [isDark, setIsDark] = useState(false);
   const [selectedPort, setSelectedPort] = useState('');
   const [baudRate, setBaudRate] = useState(1500000);
@@ -181,6 +182,7 @@ export default function App() {
   const [searchResult, setSearchResult] = useState<any>(null);
   const [searchCurrentIndex, setSearchCurrentIndex] = useState(0);
   const searchTimerRef = useRef<ReturnType<typeof setTimeout>>();
+  const dualPanelContainerRef = useRef<HTMLDivElement>(null);
   // 日志版本号 / 已知行数游标：用 ref 跟踪，避免轮询 effect 随之销毁重建
   // （旧实现用 useState 会堆叠并发轮询链并因闭包陈旧值丢日志）。
   const logsVersionRef = useRef(0);
@@ -198,6 +200,29 @@ export default function App() {
   const autoSaveBaseLineRef2 = useRef(0);
   const panel0PortConnected = Boolean(logDisplayPort && connectedPorts.includes(logDisplayPort));
   const panel1PortConnected = Boolean(logDisplayPort2 && connectedPorts.includes(logDisplayPort2));
+
+  const handleDualPanelDividerMouseDown = useCallback((e: ReactMouseEvent<HTMLButtonElement>) => {
+    e.preventDefault();
+    const container = dualPanelContainerRef.current;
+    if (!container) return;
+    const rect = container.getBoundingClientRect();
+
+    const onMove = (e: MouseEvent) => {
+      const offsetX = e.clientX - rect.left;
+      const ratio = Math.max(0.15, Math.min(0.85, offsetX / rect.width));
+      setDualPanelRatio(ratio);
+    };
+
+    const onUp = () => {
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+      document.body.style.cursor = '';
+    };
+
+    document.body.style.cursor = 'col-resize';
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  }, []);
 
   const showToast = (message: string, durationMs = 2000) => {
     const id = crypto.randomUUID();
@@ -1558,7 +1583,7 @@ export default function App() {
         </div>
       )}
 
-      <div className="flex-1 min-h-0 px-6 py-4 flex gap-4 relative">
+      <div className={`flex-1 min-h-0 px-6 py-4 flex relative ${dualPanelMode ? 'gap-0' : 'gap-4'}`} ref={dualPanelContainerRef}>
         {searchVisible && (
           <div className="absolute left-1/2 -translate-x-1/2 z-[9999]" style={{ top: -8 }}>
             <SearchBar
@@ -1619,7 +1644,7 @@ export default function App() {
           </div>
         ) : (
           <>
-            <div className="flex-1 min-h-0">
+            <div className="min-h-0 min-w-0" style={{ flex: `${dualPanelRatio} 1 0` }}>
               <LogPanel
                 isConnected={connectedPorts.length > 0}
                 logs={logs}
@@ -1656,7 +1681,16 @@ export default function App() {
                 onSearchHere={handleSearchHere}
                 />
             </div>
-            <div className="flex-1 min-h-0">
+            <button
+              type="button"
+              className="w-4 flex items-center justify-center cursor-col-resize shrink-0 group"
+              onMouseDown={handleDualPanelDividerMouseDown}
+              title="调整左右窗口宽度"
+              aria-label="调整左右窗口宽度"
+            >
+              <span className="w-1 h-8 rounded-full bg-border dark:bg-border/50 group-hover:bg-accent/70 group-hover:w-1.5 transition-all duration-200" />
+            </button>
+            <div className="min-h-0 min-w-0" style={{ flex: `${1 - dualPanelRatio} 1 0` }}>
               <LogPanel
                 isConnected={connectedPorts.length > 0}
                 logs={logs2}
