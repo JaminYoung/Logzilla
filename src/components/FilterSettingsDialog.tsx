@@ -1,6 +1,6 @@
 import { motion, AnimatePresence } from 'motion/react';
 import { X, Plus, Trash2, Pencil, Download, Upload } from 'lucide-react';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Button } from './Button';
 
 export interface FilterRule {
@@ -12,17 +12,35 @@ export interface FilterRule {
 interface FilterSettingsDialogProps {
   isOpen: boolean;
   rules: FilterRule[];
+  initialKeyword?: string;
+  initialKeywordRequestId?: number;
   onAddRule: (rule: Omit<FilterRule, 'id'>) => void;
   onUpdateRule: (id: string, rule: Omit<FilterRule, 'id'>) => void;
   onDeleteRule: (id: string) => void;
   onClose: () => void;
 }
 
-export function FilterSettingsDialog({ isOpen, rules, onAddRule, onUpdateRule, onDeleteRule, onClose }: FilterSettingsDialogProps) {
+export function FilterSettingsDialog({ isOpen, rules, initialKeyword, initialKeywordRequestId, onAddRule, onUpdateRule, onDeleteRule, onClose }: FilterSettingsDialogProps) {
   const [mode, setMode] = useState<'idle' | 'adding' | 'editing'>('idle');
   const [editingId, setEditingId] = useState<string | null>(null);
   const [keyword, setKeyword] = useState('');
   const [matchType, setMatchType] = useState<'plain' | 'regex'>('plain');
+
+  useEffect(() => {
+    if (!isOpen || initialKeywordRequestId === undefined) return;
+    const trimmed = initialKeyword?.trim();
+    if (!trimmed) {
+      setKeyword('');
+      setMatchType('plain');
+      setEditingId(null);
+      setMode('idle');
+      return;
+    }
+    setKeyword(trimmed);
+    setMatchType('plain');
+    setEditingId(null);
+    setMode('adding');
+  }, [isOpen, initialKeyword, initialKeywordRequestId]);
 
   const resetForm = () => {
     setKeyword('');

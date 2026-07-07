@@ -1,6 +1,6 @@
 import { useRef, useEffect, useState, useMemo, useCallback } from 'react';
 import { motion } from 'motion/react';
-import { Trash2, SaveAll, Copy, Scan, Search as SearchIcon, Circle, ChevronDown, Bluetooth, Usb, Cable, HelpCircle, LocateFixed } from 'lucide-react';
+import { Trash2, SaveAll, Copy, Scan, Search as SearchIcon, Circle, ChevronDown, Bluetooth, Usb, Cable, HelpCircle, LocateFixed, Funnel, Highlighter } from 'lucide-react';
 
 import { type FilterRule } from './FilterSettingsDialog';
 import { type HighlightRule } from './HighlightSettingsDialog';
@@ -427,6 +427,8 @@ interface LogPanelProps {
   view0Active: boolean;
   view1Active: boolean;
   onSearchHere?: (viewId: number, query?: string) => void;
+  onAddFilterKeyword?: (keyword: string) => void;
+  onAddHighlightKeyword?: (keyword: string) => void;
 }
 
 export function LogPanel({
@@ -461,6 +463,8 @@ export function LogPanel({
   view0Active,
   view1Active,
   onSearchHere,
+  onAddFilterKeyword,
+  onAddHighlightKeyword,
 }: LogPanelProps) {
   const logEndRef = useRef<HTMLDivElement>(null);
   const topEndRef = useRef<HTMLDivElement>(null);
@@ -499,14 +503,22 @@ export function LogPanel({
   const makeContextMenuHandler = (viewId: number) => (e: React.MouseEvent) => {
     e.preventDefault();
     e.stopPropagation();
-    ctxSavedSelectionRef.current = window.getSelection()?.toString() || '';
+    const selection = window.getSelection();
+    const selectionInThisView = Boolean(
+      selection?.rangeCount &&
+      selection.anchorNode &&
+      selection.focusNode &&
+      e.currentTarget.contains(selection.anchorNode) &&
+      e.currentTarget.contains(selection.focusNode)
+    );
+    ctxSavedSelectionRef.current = selectionInThisView ? selection?.toString() || '' : '';
     ctxContainerRef.current = e.currentTarget as HTMLElement;
     const lineEl = (e.target as HTMLElement).closest('[data-original-text]') as HTMLElement | null;
     ctxLineRef.current = lineEl?.textContent || '';
     ctxOriginalIndexRef.current = lineEl?.dataset.originalIndex ?? null;
     ctxViewIdRef.current = viewId;
     const menuW = 180;
-    const menuH = 160;
+    const menuH = ctxSavedSelectionRef.current.trim() ? 340 : 260;
     let x = e.clientX;
     let y = e.clientY;
     if (y + menuH > window.innerHeight) {
@@ -545,6 +557,18 @@ export function LogPanel({
     setCtxMenu(null);
     const selectedText = ctxSavedSelectionRef.current;
     onSearchHere?.(ctxViewIdRef.current, selectedText || undefined);
+  };
+
+  const handleCtxAddFilterKeyword = () => {
+    setCtxMenu(null);
+    const keyword = ctxSavedSelectionRef.current.trim();
+    if (keyword) onAddFilterKeyword?.(keyword);
+  };
+
+  const handleCtxAddHighlightKeyword = () => {
+    setCtxMenu(null);
+    const keyword = ctxSavedSelectionRef.current.trim();
+    if (keyword) onAddHighlightKeyword?.(keyword);
   };
 
   // Scroll the main (upper) view to the row whose original buffer index == `index`,
@@ -926,6 +950,7 @@ export function LogPanel({
     {/* Right-click context menu */}
     {ctxMenu && (() => {
       const isDark = document.documentElement.classList.contains('dark');
+      const hasSelectedText = ctxSavedSelectionRef.current.trim().length > 0;
       return (
       <div
         className="fixed z-[9999] min-w-[160px] rounded-xl overflow-hidden"
@@ -961,6 +986,24 @@ export function LogPanel({
           <SearchIcon className="w-4 h-4" />
           搜索
         </div>
+        {hasSelectedText && onAddFilterKeyword && (
+          <div
+            onClick={handleCtxAddFilterKeyword}
+            className="px-4 py-2.5 text-sm cursor-pointer hover:bg-black/10 dark:hover:bg-white/10 transition-colors flex items-center gap-2"
+          >
+            <Funnel className="w-4 h-4" />
+            匹配过滤
+          </div>
+        )}
+        {hasSelectedText && onAddHighlightKeyword && (
+          <div
+            onClick={handleCtxAddHighlightKeyword}
+            className="px-4 py-2.5 text-sm cursor-pointer hover:bg-black/10 dark:hover:bg-white/10 transition-colors flex items-center gap-2"
+          >
+            <Highlighter className="w-4 h-4" />
+            高亮显示
+          </div>
+        )}
         {ctxViewIdRef.current % 2 === 1 && ctxOriginalIndexRef.current != null && (
           <div
             onClick={handleCtxLocateLog}

@@ -153,11 +153,13 @@ export default function App() {
   const [filterEnabled, setFilterEnabled] = useState(false);
   const [filterRules, setFilterRules] = useState<FilterRule[]>([]);
   const [filterDialogOpen, setFilterDialogOpen] = useState(false);
+  const [filterDialogDraft, setFilterDialogDraft] = useState<{ keyword: string; requestId: number } | null>(null);
   const [portTypes, setPortTypes] = useState<Record<string, string>>({});
   const [portDescriptions, setPortDescriptions] = useState<Record<string, string>>({});
   const [highlightEnabled, setHighlightEnabled] = useState(false);
   const [highlightRules, setHighlightRules] = useState<HighlightRule[]>([]);
   const [highlightDialogOpen, setHighlightDialogOpen] = useState(false);
+  const [highlightDialogDraft, setHighlightDialogDraft] = useState<{ keyword: string; requestId: number } | null>(null);
   const [fontSize, setFontSize] = useState<'xs' | 'sm' | 'base'>('xs');
   const [maxCacheKb, setMaxCacheKb] = useState(50);
   const maxLines = Math.max(1, maxCacheKb) * 1000;
@@ -862,6 +864,30 @@ export default function App() {
 
   const handleUpdateHighlightRule = (id: string, rule: Omit<HighlightRule, 'id'>) => {
     setHighlightRules(prev => prev.map(r => r.id === id ? { ...r, ...rule } : r));
+  };
+
+  const handleOpenFilterSettings = () => {
+    setFilterDialogDraft({ keyword: '', requestId: Date.now() });
+    setFilterDialogOpen(true);
+  };
+
+  const handleOpenHighlightSettings = () => {
+    setHighlightDialogDraft({ keyword: '', requestId: Date.now() });
+    setHighlightDialogOpen(true);
+  };
+
+  const handleAddFilterKeywordFromSelection = (keyword: string) => {
+    const trimmed = keyword.trim();
+    if (!trimmed) return;
+    setFilterDialogDraft({ keyword: trimmed, requestId: Date.now() });
+    setFilterDialogOpen(true);
+  };
+
+  const handleAddHighlightKeywordFromSelection = (keyword: string) => {
+    const trimmed = keyword.trim();
+    if (!trimmed) return;
+    setHighlightDialogDraft({ keyword: trimmed, requestId: Date.now() });
+    setHighlightDialogOpen(true);
   };
 
   const handleSaveConfig = async (changes: [ConfigItem, any][]) => {
@@ -1637,9 +1663,11 @@ export default function App() {
               searchQuery={searchQuery}
               searchMode={searchMode}
               searchCaseSensitive={searchCaseSensitive}
-               view0Active={searchScope.view0 && searchVisible}
-               view1Active={searchScope.view1 && searchVisible && filterEnabled && filterRules.length > 0}
+              view0Active={searchScope.view0 && searchVisible}
+              view1Active={searchScope.view1 && searchVisible && filterEnabled && filterRules.length > 0}
               onSearchHere={handleSearchHere}
+              onAddFilterKeyword={handleAddFilterKeywordFromSelection}
+              onAddHighlightKeyword={handleAddHighlightKeywordFromSelection}
             />
           </div>
         ) : (
@@ -1679,6 +1707,8 @@ export default function App() {
                 view0Active={searchScope.view0 && searchVisible}
                 view1Active={searchScope.view1 && searchVisible && filterEnabled && filterRules.length > 0}
                 onSearchHere={handleSearchHere}
+                onAddFilterKeyword={handleAddFilterKeywordFromSelection}
+                onAddHighlightKeyword={handleAddHighlightKeywordFromSelection}
                 />
             </div>
             <button
@@ -1725,6 +1755,8 @@ export default function App() {
                 view0Active={searchScope.view2 && searchVisible}
                 view1Active={searchScope.view3 && searchVisible && filterEnabled && filterRules.length > 0}
                 onSearchHere={handleSearchHere}
+                onAddFilterKeyword={handleAddFilterKeywordFromSelection}
+                onAddHighlightKeyword={handleAddHighlightKeywordFromSelection}
                 />
             </div>
           </>
@@ -1740,10 +1772,10 @@ export default function App() {
         onTimestampToggle={() => setTimestampEnabled(prev => !prev)}
         filterEnabled={filterEnabled}
         onFilterToggle={handleFilterToggle}
-        onFilterSettings={() => setFilterDialogOpen(true)}
+        onFilterSettings={handleOpenFilterSettings}
         highlightEnabled={highlightEnabled}
         onHighlightToggle={handleHighlightToggle}
-        onHighlightSettings={() => setHighlightDialogOpen(true)}
+        onHighlightSettings={handleOpenHighlightSettings}
         logSaveDir={logSaveDir}
         onSelectLogDir={handleSelectLogDir}
         onHciExtract={handleHciExtract}
@@ -1781,19 +1813,29 @@ export default function App() {
       <FilterSettingsDialog
         isOpen={filterDialogOpen}
         rules={filterRules}
+        initialKeyword={filterDialogDraft?.keyword}
+        initialKeywordRequestId={filterDialogDraft?.requestId}
         onAddRule={handleAddRule}
         onUpdateRule={handleUpdateRule}
         onDeleteRule={handleDeleteRule}
-        onClose={() => setFilterDialogOpen(false)}
+        onClose={() => {
+          setFilterDialogOpen(false);
+          setFilterDialogDraft(null);
+        }}
       />
 
       <HighlightSettingsDialog
         isOpen={highlightDialogOpen}
         rules={highlightRules}
+        initialKeyword={highlightDialogDraft?.keyword}
+        initialKeywordRequestId={highlightDialogDraft?.requestId}
         onAddRule={handleAddHighlightRule}
         onUpdateRule={handleUpdateHighlightRule}
         onDeleteRule={handleDeleteHighlightRule}
-        onClose={() => setHighlightDialogOpen(false)}
+        onClose={() => {
+          setHighlightDialogOpen(false);
+          setHighlightDialogDraft(null);
+        }}
       />
 
 

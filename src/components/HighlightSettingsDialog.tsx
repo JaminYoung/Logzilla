@@ -1,6 +1,6 @@
 import { motion, AnimatePresence } from 'motion/react';
 import { X, Plus, Trash2, Pencil, Download, Upload } from 'lucide-react';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Button } from './Button';
 
 export interface HighlightRule {
@@ -23,13 +23,15 @@ const PRESET_STYLES = [
 interface HighlightSettingsDialogProps {
   isOpen: boolean;
   rules: HighlightRule[];
+  initialKeyword?: string;
+  initialKeywordRequestId?: number;
   onAddRule: (rule: Omit<HighlightRule, 'id'>) => void;
   onUpdateRule: (id: string, rule: Omit<HighlightRule, 'id'>) => void;
   onDeleteRule: (id: string) => void;
   onClose: () => void;
 }
 
-export function HighlightSettingsDialog({ isOpen, rules, onAddRule, onUpdateRule, onDeleteRule, onClose }: HighlightSettingsDialogProps) {
+export function HighlightSettingsDialog({ isOpen, rules, initialKeyword, initialKeywordRequestId, onAddRule, onUpdateRule, onDeleteRule, onClose }: HighlightSettingsDialogProps) {
   const [mode, setMode] = useState<'idle' | 'adding' | 'editing'>('idle');
   const [editingId, setEditingId] = useState<string | null>(null);
   const [keyword, setKeyword] = useState('');
@@ -37,6 +39,28 @@ export function HighlightSettingsDialog({ isOpen, rules, onAddRule, onUpdateRule
   const [selectedStyle, setSelectedStyle] = useState<number | null>(0);
   const [customTextColor, setCustomTextColor] = useState(PRESET_STYLES[0].textColor);
   const [customBgColor, setCustomBgColor] = useState(PRESET_STYLES[0].bgColor);
+
+  useEffect(() => {
+    if (!isOpen || initialKeywordRequestId === undefined) return;
+    const trimmed = initialKeyword?.trim();
+    if (!trimmed) {
+      setKeyword('');
+      setMatchType('plain');
+      setSelectedStyle(0);
+      setCustomTextColor(PRESET_STYLES[0].textColor);
+      setCustomBgColor(PRESET_STYLES[0].bgColor);
+      setEditingId(null);
+      setMode('idle');
+      return;
+    }
+    setKeyword(trimmed);
+    setMatchType('plain');
+    setSelectedStyle(0);
+    setCustomTextColor(PRESET_STYLES[0].textColor);
+    setCustomBgColor(PRESET_STYLES[0].bgColor);
+    setEditingId(null);
+    setMode('adding');
+  }, [isOpen, initialKeyword, initialKeywordRequestId]);
 
   const resetForm = () => {
     setKeyword('');
