@@ -48,7 +48,7 @@ const menuItems = [
   },
   {
     title: '设置',
-    items: ['字体', '缓存', '渲染间隔']
+    items: ['字体', '缓存行数', '渲染间隔']
   },
   {
     title: '其他',
@@ -206,23 +206,23 @@ export function LeftSideMenu({
     <div className="w-full px-8 py-2 hover:bg-accent/20 transition-colors">
       <div className="flex items-center gap-2 mb-1.5">
         <HardDrive className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
-        <span className="text-base text-muted-foreground">缓存</span>
+        <span className="text-base text-muted-foreground">缓存行数</span>
       </div>
       <div className="flex items-center gap-2">
         <input
           type="number"
-          min={50}
+          min={1}
           step={10}
           value={maxCacheKb}
           onChange={e => {
             const val = parseInt(e.target.value);
-            if (!isNaN(val) && val >= 50) {
+            if (!isNaN(val) && val >= 1) {
               onMaxCacheKbChange?.(val);
             }
           }}
-          className="w-16 px-2 py-1 rounded-lg text-sm bg-input-background border border-border text-foreground focus:outline-none focus:ring-1 focus:ring-primary/50 text-center"
+          className="w-24 px-2 py-1 rounded-lg text-sm bg-input-background border border-border text-foreground focus:outline-none focus:ring-1 focus:ring-primary/50 text-center"
         />
-        <span className="text-sm text-muted-foreground">KB</span>
+        <span className="text-sm text-muted-foreground">K</span>
       </div>
     </div>
   );
@@ -363,7 +363,7 @@ export function LeftSideMenu({
     if (item === '日志过滤') return renderFilterItem();
     if (item === '关键词高亮') return renderHighlightItem();
     if (item === '字体') return renderFontSizeItem();
-    if (item === '缓存') return renderCacheItem();
+    if (item === '缓存行数') return renderCacheItem();
     if (item === '渲染间隔') return renderPollingItem();
     if (item === 'HCI日志提取') {
       return (

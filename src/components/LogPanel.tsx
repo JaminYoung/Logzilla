@@ -402,6 +402,10 @@ interface LogPanelProps {
   onRevealFile?: (path: string) => void;
   onExportHci?: () => void;
   fontSize?: 'xs' | 'sm' | 'base';
+  logBaseIndex?: number;
+  filteredLogsOverride?: string[];
+  filteredIndicesOverride?: number[];
+  onLoadLogWindow?: (panelIndex: 0 | 1, centerLine: number) => Promise<boolean>;
   // Search props
   panelIndex?: 0 | 1;
   searchQuery: string;
@@ -433,6 +437,10 @@ export function LogPanel({
   onRevealFile,
   onExportHci,
   fontSize = 'xs',
+  logBaseIndex = 0,
+  filteredLogsOverride,
+  filteredIndicesOverride,
+  onLoadLogWindow,
   panelIndex = 0,
   searchQuery,
   searchMode,
@@ -534,12 +542,25 @@ export function LogPanel({
     const logContainer = scrollableDiv.querySelector(':scope > div');
     if (!logContainer) return;
 
-    const tryLocate = (attempt: number) => {
-      const lineDivs = logContainer.querySelectorAll(':scope > div');
-      const target = lineDivs[index] as HTMLElement | undefined;
+    const findTarget = () => {
+      return logContainer.querySelector(`[data-original-index="${index}"]`) as HTMLElement | null;
+    };
+
+    const tryLocate = async (attempt: number, loadedHistory: boolean) => {
+      const target = findTarget();
       if (!target) {
         // rAF flush may lag behind the just-grown logs buffer; retry a few frames.
-        if (attempt < 10) requestAnimationFrame(() => tryLocate(attempt + 1));
+        if (attempt < 10) {
+          requestAnimationFrame(() => { void tryLocate(attempt + 1, loadedHistory); });
+          return;
+        }
+        if (!loadedHistory && onLoadLogWindow) {
+          const mainPanelIndex = viewId === 'view2' ? 1 : 0;
+          const loaded = await onLoadLogWindow(mainPanelIndex, index);
+          if (loaded) {
+            requestAnimationFrame(() => { void tryLocate(0, true); });
+          }
+        }
         return;
       }
 
@@ -574,8 +595,8 @@ export function LogPanel({
       }, 1500);
     };
 
-    tryLocate(0);
-  }, []);
+    void tryLocate(0, false);
+  }, [onLoadLogWindow]);
 
   const handleCtxLocateLog = () => {
     setCtxMenu(null);
@@ -639,6 +660,12 @@ export function LogPanel({
   const hasSplit = filterEnabled && filterRules.length > 0;
 
   const filteredEntries = useMemo(() => {
+    if (filteredLogsOverride && filteredIndicesOverride) {
+      return filteredLogsOverride.map((text, i) => ({
+        text,
+        idx: filteredIndicesOverride[i],
+      }));
+    }
     if (!hasSplit) return [];
     const out: { text: string; idx: number }[] = [];
     logs.forEach((line, idx) => {
@@ -652,13 +679,17 @@ export function LogPanel({
           return false;
         }
       })) {
-        out.push({ text: line, idx });
+        out.push({ text: line, idx: logBaseIndex + idx });
       }
     });
     return out;
-  }, [logs, hasSplit, filterRules]);
+  }, [logs, hasSplit, filterRules, logBaseIndex, filteredLogsOverride, filteredIndicesOverride]);
   const filteredLogs = useMemo(() => filteredEntries.map(e => e.text), [filteredEntries]);
   const filteredIndices = useMemo(() => filteredEntries.map(e => e.idx), [filteredEntries]);
+  const mainOriginalIndices = useMemo(
+    () => logs.map((_, idx) => logBaseIndex + idx),
+    [logs, logBaseIndex]
+  );
 
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
@@ -856,7 +887,7 @@ export function LogPanel({
             className="min-h-0 rounded-lg bg-white dark:bg-white/[0.03]"
             style={{ flex: splitRatio }}
           >
-            <DomLogList lines={logs} emptyMessage="等待日志..." onContextMenu={makeContextMenuHandler(viewIdBase)} highlightEnabled={highlightEnabled} highlightRules={highlightRules} fontSize={fontSize} viewId={`view${viewIdBase}`} searchQuery={searchQuery} searchMode={searchMode} searchCaseSensitive={searchCaseSensitive} searchActive={searchQuery !== '' && view0Active} pauseAutoFollowRef={pauseAutoFollowRef} />
+            <DomLogList lines={logs} emptyMessage="等待日志..." onContextMenu={makeContextMenuHandler(viewIdBase)} highlightEnabled={highlightEnabled} highlightRules={highlightRules} fontSize={fontSize} viewId={`view${viewIdBase}`} searchQuery={searchQuery} searchMode={searchMode} searchCaseSensitive={searchCaseSensitive} searchActive={searchQuery !== '' && view0Active} originalIndices={mainOriginalIndices} pauseAutoFollowRef={pauseAutoFollowRef} />
           </div>
           <div
             className="flex items-center justify-center cursor-row-resize shrink-0 py-1 group"
@@ -873,7 +904,7 @@ export function LogPanel({
         </div>
       ) : (
         <div className="flex-1 min-h-0">
-          <DomLogList lines={logs} emptyMessage="等待日志..." onContextMenu={makeContextMenuHandler(viewIdBase)} highlightEnabled={highlightEnabled} highlightRules={highlightRules} fontSize={fontSize} viewId={`view${viewIdBase}`} searchQuery={searchQuery} searchMode={searchMode} searchCaseSensitive={searchCaseSensitive} searchActive={searchQuery !== '' && view0Active} pauseAutoFollowRef={pauseAutoFollowRef} />
+          <DomLogList lines={logs} emptyMessage="等待日志..." onContextMenu={makeContextMenuHandler(viewIdBase)} highlightEnabled={highlightEnabled} highlightRules={highlightRules} fontSize={fontSize} viewId={`view${viewIdBase}`} searchQuery={searchQuery} searchMode={searchMode} searchCaseSensitive={searchCaseSensitive} searchActive={searchQuery !== '' && view0Active} originalIndices={mainOriginalIndices} pauseAutoFollowRef={pauseAutoFollowRef} />
         </div>
       )}
 

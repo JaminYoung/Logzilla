@@ -15,6 +15,7 @@ pub struct SerialReaderConfig {
     pub timestamp_enabled: bool,
     pub max_lines: usize,
     pub panel: usize,
+    pub auto_save_path: Option<String>,
 }
 
 pub struct SerialReaderControl {
@@ -109,6 +110,7 @@ pub fn run() {
             usb_audio_commands::usb_audio_extract,
             hci_parser_commands::parse_protocol_line,
             search_commands::get_logs,
+            search_commands::read_log_window,
             search_commands::clear_logs,
         ])
         .run(tauri::generate_context!())

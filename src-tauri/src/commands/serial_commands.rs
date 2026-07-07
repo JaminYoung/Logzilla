@@ -2,6 +2,7 @@ use crate::core::serial::port::SerialPortHandle;
 use crate::{AppState, SerialReaderConfig, SerialReaderControl};
 use chrono::Local;
 use serde::{Deserialize, Serialize};
+use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
@@ -171,8 +172,10 @@ fn append_log_lines(
 
     logs.extend(new_lines);
 
-    if logs.len() > max_lines {
-        let drain_count = logs.len() - max_lines;
+    let retention_lines = max_lines.max(1);
+
+    if logs.len() > retention_lines {
+        let drain_count = logs.len() - retention_lines;
         logs.drain(0..drain_count);
         let mut base = if panel == 1 {
             state.logs2_base.lock().map_err(|e| e.to_string())?
@@ -183,6 +186,28 @@ fn append_log_lines(
     }
 
     *version += 1;
+    Ok(())
+}
+
+fn append_auto_save_lines(path: &str, lines: &[String]) -> Result<(), String> {
+    if lines.is_empty() {
+        return Ok(());
+    }
+
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(|e| format!("Failed to open auto-save file: {}", e))?;
+
+    for line in lines {
+        file.write_all(line.as_bytes())
+            .map_err(|e| format!("Failed to write auto-save file: {}", e))?;
+        file.write_all(b"\n")
+            .map_err(|e| format!("Failed to write auto-save file: {}", e))?;
+    }
+    file.flush()
+        .map_err(|e| format!("Failed to flush auto-save file: {}", e))?;
     Ok(())
 }
 
@@ -270,6 +295,7 @@ pub fn start_serial_reader(
     timestamp_enabled: bool,
     max_lines: usize,
     panel: usize,
+    auto_save_path: Option<String>,
     state: State<'_, AppState>,
     app_handle: tauri::AppHandle,
 ) -> Result<(), String> {
@@ -285,6 +311,7 @@ pub fn start_serial_reader(
         timestamp_enabled,
         max_lines,
         panel,
+        auto_save_path,
     };
 
     let mut readers = state.serial_readers.lock().map_err(|e| e.to_string())?;
@@ -350,8 +377,18 @@ pub fn start_serial_reader(
 
                 if !completed_lines.is_empty() {
                     if let Ok(cfg) = config.lock() {
+                        let panel = cfg.panel;
+                        let max_lines = cfg.max_lines;
+                        let auto_save_path = cfg.auto_save_path.clone();
+                        drop(cfg);
+
                         let state = app_handle.state::<AppState>();
-                        let _ = append_log_lines(&state, cfg.panel, cfg.max_lines, completed_lines);
+                        if let Some(path) = auto_save_path.as_deref() {
+                            if let Err(e) = append_auto_save_lines(path, &completed_lines) {
+                                eprintln!("[LOGZILLA] auto-save failed: {}", e);
+                            }
+                        }
+                        let _ = append_log_lines(&state, panel, max_lines, completed_lines);
                     }
                 }
             }
@@ -463,8 +500,10 @@ pub fn read_serial_data(
 
             // 限制最大行数：从头丢弃旧行，并把丢弃数累加到 base 游标，
             // 使前端的累计行号仍能正确映射到缓冲区内下标。
-            if logs.len() > max_lines {
-                let drain_count = logs.len() - max_lines;
+            let retention_lines = max_lines.max(1);
+
+            if logs.len() > retention_lines {
+                let drain_count = logs.len() - retention_lines;
                 logs.drain(0..drain_count);
                 let mut base = if panel == 1 {
                     state.logs2_base.lock().map_err(|e| e.to_string())?

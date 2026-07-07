@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { TitleBar } from './components/TitleBar';
 import { SecondaryToolbar } from './components/SecondaryToolbar';
 import { useWindowMoving } from './hooks/useWindowMoving';
@@ -56,6 +56,16 @@ interface DcfInfo {
   info_data: number[];
 }
 
+interface FilteredLogEntry {
+  text: string;
+  idx: number;
+}
+
+interface LogWindow {
+  start_line: number;
+  lines: string[];
+}
+
 function generateLogFileName(port: string, date: Date): string {
   const portName = port.replace(/\\/g, '_').replace(/\//g, '_');
   const pad = (n: number) => String(n).padStart(2, '0');
@@ -96,13 +106,19 @@ function matchesFilterRules(line: string, rules: FilterRule[]): boolean {
   });
 }
 
-function getFilteredLogsForSearch(logs: string[], enabled: boolean, rules: FilterRule[]): string[] {
-  if (!enabled || rules.length === 0) return [];
-  return logs.filter(line => matchesFilterRules(line, rules));
-}
-
 function keepTail<T>(items: T[], maxItems: number): T[] {
   return items.length > maxItems ? items.slice(items.length - maxItems) : items;
+}
+
+function buildFilteredEntries(lines: string[], baseLine: number, rules: FilterRule[]): FilteredLogEntry[] {
+  if (rules.length === 0) return [];
+  const out: FilteredLogEntry[] = [];
+  lines.forEach((line, idx) => {
+    if (matchesFilterRules(line, rules)) {
+      out.push({ text: line, idx: baseLine + idx });
+    }
+  });
+  return out;
 }
 
 export default function App() {
@@ -124,8 +140,12 @@ export default function App() {
   const [isFlashing, setIsFlashing] = useState(false);
   const [flashProgress, setFlashProgress] = useState(0);
   const [logs, setLogs] = useState<string[]>([]);
+  const [logsBaseLine, setLogsBaseLine] = useState(0);
+  const [filteredLogEntries, setFilteredLogEntries] = useState<FilteredLogEntry[]>([]);
   const [logDisplayPort, setLogDisplayPort] = useState<string>('');
   const [logs2, setLogs2] = useState<string[]>([]);
+  const [logs2BaseLine, setLogs2BaseLine] = useState(0);
+  const [filteredLogEntries2, setFilteredLogEntries2] = useState<FilteredLogEntry[]>([]);
   const [logDisplayPort2, setLogDisplayPort2] = useState<string>('');
   const [toasts, setToasts] = useState<{ id: string; message: string }[]>([]);
   const [timestampEnabled, setTimestampEnabled] = useState(true);
@@ -139,7 +159,8 @@ export default function App() {
   const [highlightDialogOpen, setHighlightDialogOpen] = useState(false);
   const [fontSize, setFontSize] = useState<'xs' | 'sm' | 'base'>('xs');
   const [maxCacheKb, setMaxCacheKb] = useState(50);
-  const maxLines = Math.max(500, maxCacheKb * 10);
+  const maxLines = Math.max(1, maxCacheKb) * 1000;
+  const maxFilterLines = maxLines;
   const [pollIntervalMs, setPollIntervalMs] = useState(50);
   const [autoSaveEnabled, setAutoSaveEnabled] = useState(false);
   const [autoSaveEnabled2, setAutoSaveEnabled2] = useState(false);
@@ -166,11 +187,15 @@ export default function App() {
   const logs2VersionRef = useRef(0);
   const logsLenRef = useRef(0);
   const logs2LenRef = useRef(0);
+  const logsBaseLineRef = useRef(0);
+  const logs2BaseLineRef = useRef(0);
   const [usbAudioDialogOpen, setUsbAudioDialogOpen] = useState(false);
   useWindowMoving(300);
 
   const autoSavePathRef = useRef('');
   const autoSavePathRef2 = useRef('');
+  const autoSaveBaseLineRef = useRef(0);
+  const autoSaveBaseLineRef2 = useRef(0);
   const panel0PortConnected = Boolean(logDisplayPort && connectedPorts.includes(logDisplayPort));
   const panel1PortConnected = Boolean(logDisplayPort2 && connectedPorts.includes(logDisplayPort2));
 
@@ -193,11 +218,17 @@ export default function App() {
     if (panel === 0) {
       logsLenRef.current = 0;
       logsVersionRef.current = 0;
+      logsBaseLineRef.current = 0;
+      setLogsBaseLine(0);
       setLogs([]);
+      setFilteredLogEntries([]);
     } else {
       logs2LenRef.current = 0;
       logs2VersionRef.current = 0;
+      logs2BaseLineRef.current = 0;
+      setLogs2BaseLine(0);
       setLogs2([]);
+      setFilteredLogEntries2([]);
     }
   };
 
@@ -255,6 +286,16 @@ export default function App() {
   useEffect(() => { localStorage.setItem('logzilla_pollIntervalMs', JSON.stringify(pollIntervalMs)); }, [pollIntervalMs]);
   useEffect(() => { localStorage.setItem('logzilla_wpsPath', wpsPath); }, [wpsPath]);
 
+  useEffect(() => {
+    if (!filterEnabled || filterRules.length === 0) {
+      setFilteredLogEntries([]);
+      setFilteredLogEntries2([]);
+      return;
+    }
+    setFilteredLogEntries(buildFilteredEntries(logs, logsBaseLine, filterRules));
+    setFilteredLogEntries2(buildFilteredEntries(logs2, logs2BaseLine, filterRules));
+  }, [filterEnabled, filterRules]);
+
   const refreshAutoSavePath = (port: string) => {
     if (!autoSaveEnabled || !logSaveDir || !port) {
       autoSavePathRef.current = '';
@@ -264,6 +305,7 @@ export default function App() {
     const fileName = generateLogFileName(port, new Date());
     const path = `${logSaveDir}\\${fileName}`;
     autoSavePathRef.current = path;
+    autoSaveBaseLineRef.current = logsLenRef.current;
     setAutoSaveDisplayPath(path);
   };
 
@@ -276,6 +318,7 @@ export default function App() {
     const fileName = generateLogFileName(port, new Date());
     const path = `${logSaveDir}\\${fileName}`;
     autoSavePathRef2.current = path;
+    autoSaveBaseLineRef2.current = logs2LenRef.current;
     setAutoSaveDisplayPath2(path);
   };
 
@@ -305,7 +348,8 @@ export default function App() {
           port: logDisplayPort,
           timestampEnabled,
           maxLines,
-          panel: 0
+          panel: 0,
+          autoSavePath: autoSaveDisplayPath || null
         });
       } catch (e) {
         console.error('Start serial reader error:', e);
@@ -331,14 +375,15 @@ export default function App() {
           port: logDisplayPort,
           timestampEnabled,
           maxLines,
-          panel: 0
+          panel: 0,
+          autoSavePath: autoSaveDisplayPath || null
         });
       } catch (e) {
         console.error('Update serial reader error:', e);
       }
     };
     updateReader();
-  }, [logDisplayPort, panel0PortConnected, timestampEnabled, maxLines]);
+  }, [logDisplayPort, panel0PortConnected, timestampEnabled, maxLines, autoSaveDisplayPath]);
 
   // 从后端获取日志用于显示（面板0）
   useEffect(() => {
@@ -353,7 +398,7 @@ export default function App() {
       }
       try {
         const { invoke } = await import('@tauri-apps/api/core');
-        const [newLogs, newVersion, nextKnownLines] = await invoke<[string[], number, number]>('get_logs', {
+        const [newLogs, newVersion, nextKnownLines] = await invoke<[string[], number, number, number]>('get_logs', {
           panel: 0,
           sinceVersion: logsVersionRef.current,
           knownLines: logsLenRef.current
@@ -363,7 +408,23 @@ export default function App() {
           logsVersionRef.current = newVersion;
           logsLenRef.current = nextKnownLines;
           if (newLogs.length > 0) {
-            setLogs(prev => keepTail([...prev, ...newLogs], maxLines));
+            const newStartLine = nextKnownLines - newLogs.length;
+            if (filterEnabled && filterRules.length > 0) {
+              const matches = buildFilteredEntries(newLogs, newStartLine, filterRules);
+              if (matches.length > 0) {
+                setFilteredLogEntries(prev => keepTail([...prev, ...matches], maxFilterLines));
+              }
+            }
+            setLogs(prev => {
+              const expectedStart = logsBaseLineRef.current + prev.length;
+              const combined = newStartLine === expectedStart ? [...prev, ...newLogs] : [...newLogs];
+              let nextBase = newStartLine === expectedStart ? logsBaseLineRef.current : newStartLine;
+              const trimmed = keepTail(combined, maxLines);
+              nextBase += combined.length - trimmed.length;
+              logsBaseLineRef.current = nextBase;
+              setLogsBaseLine(nextBase);
+              return trimmed;
+            });
           }
         }
       } catch (e) {
@@ -377,7 +438,7 @@ export default function App() {
 
     fetchLogs();
     return () => { isActive = false; if (timer) clearTimeout(timer); };
-  }, [pollIntervalMs, maxLines]);
+  }, [pollIntervalMs, maxLines, filterEnabled, filterRules, maxFilterLines]);
 
   // 从后端获取日志用于显示（面板1）
   useEffect(() => {
@@ -393,7 +454,7 @@ export default function App() {
       }
       try {
         const { invoke } = await import('@tauri-apps/api/core');
-        const [newLogs, newVersion, nextKnownLines] = await invoke<[string[], number, number]>('get_logs', {
+        const [newLogs, newVersion, nextKnownLines] = await invoke<[string[], number, number, number]>('get_logs', {
           panel: 1,
           sinceVersion: logs2VersionRef.current,
           knownLines: logs2LenRef.current
@@ -403,7 +464,23 @@ export default function App() {
           logs2VersionRef.current = newVersion;
           logs2LenRef.current = nextKnownLines;
           if (newLogs.length > 0) {
-            setLogs2(prev => keepTail([...prev, ...newLogs], maxLines));
+            const newStartLine = nextKnownLines - newLogs.length;
+            if (filterEnabled && filterRules.length > 0) {
+              const matches = buildFilteredEntries(newLogs, newStartLine, filterRules);
+              if (matches.length > 0) {
+                setFilteredLogEntries2(prev => keepTail([...prev, ...matches], maxFilterLines));
+              }
+            }
+            setLogs2(prev => {
+              const expectedStart = logs2BaseLineRef.current + prev.length;
+              const combined = newStartLine === expectedStart ? [...prev, ...newLogs] : [...newLogs];
+              let nextBase = newStartLine === expectedStart ? logs2BaseLineRef.current : newStartLine;
+              const trimmed = keepTail(combined, maxLines);
+              nextBase += combined.length - trimmed.length;
+              logs2BaseLineRef.current = nextBase;
+              setLogs2BaseLine(nextBase);
+              return trimmed;
+            });
           }
         }
       } catch (e) {
@@ -417,7 +494,7 @@ export default function App() {
 
     fetchLogs2();
     return () => { isActive = false; if (timer) clearTimeout(timer); };
-  }, [dualPanelMode, pollIntervalMs, maxLines]);
+  }, [dualPanelMode, pollIntervalMs, maxLines, filterEnabled, filterRules, maxFilterLines]);
 
   // Start/stop backend serial reader for panel 1.
   useEffect(() => {
@@ -430,7 +507,8 @@ export default function App() {
           port: logDisplayPort2,
           timestampEnabled,
           maxLines,
-          panel: 1
+          panel: 1,
+          autoSavePath: autoSaveDisplayPath2 || null
         });
       } catch (e) {
         console.error('Start serial reader2 error:', e);
@@ -456,14 +534,15 @@ export default function App() {
           port: logDisplayPort2,
           timestampEnabled,
           maxLines,
-          panel: 1
+          panel: 1,
+          autoSavePath: autoSaveDisplayPath2 || null
         });
       } catch (e) {
         console.error('Update serial reader2 error:', e);
       }
     };
     updateReader();
-  }, [logDisplayPort2, panel1PortConnected, timestampEnabled, maxLines]);
+  }, [logDisplayPort2, panel1PortConnected, timestampEnabled, maxLines, autoSaveDisplayPath2]);
 
   // Live Import HCI sending
   const liveImportIndexRef = useRef(0);
@@ -504,10 +583,13 @@ export default function App() {
       try {
         const { invoke } = await import('@tauri-apps/api/core');
 
-        const processPanel = async (logLines: string[], indexRef: { current: number }, sent: boolean) => {
-          const newLines = logLines.slice(indexRef.current);
+        const processPanel = async (logLines: string[], baseLine: number, indexRef: { current: number }, sent: boolean) => {
+          const absEnd = baseLine + logLines.length;
+          if (indexRef.current >= absEnd) return;
+          const startLocal = Math.max(0, indexRef.current - baseLine);
+          const newLines = logLines.slice(startLocal);
           if (newLines.length === 0) return;
-          indexRef.current = logLines.length;
+          indexRef.current = absEnd;
 
           const frames = newLines.map(l => extractFrame(l, sent)).filter(Boolean);
           if (frames.length === 0) return;
@@ -520,10 +602,10 @@ export default function App() {
         };
 
         if (logDisplayPort === liveImportSelectedPort) {
-          await processPanel(logs, liveImportIndexRef, true);
+          await processPanel(logs, logsBaseLine, liveImportIndexRef, true);
         }
         if (dualPanelMode && logDisplayPort2 === liveImportSelectedPort) {
-          await processPanel(logs2, liveImportIndex2Ref, false);
+          await processPanel(logs2, logs2BaseLine, liveImportIndex2Ref, false);
         }
       } catch {}
       if (isActive) pollTimer = setTimeout(poll, 300);
@@ -531,7 +613,7 @@ export default function App() {
 
     pollTimer = setTimeout(poll, 300);
     return () => { isActive = false; if (pollTimer) clearTimeout(pollTimer); };
-  }, [liveImportReady, logs, logs2, dualPanelMode, liveImportSelectedPort, logDisplayPort, logDisplayPort2]);
+  }, [liveImportReady, logs, logs2, logsBaseLine, logs2BaseLine, dualPanelMode, liveImportSelectedPort, logDisplayPort, logDisplayPort2]);
 
   // Poll send stats from backend
   useEffect(() => {
@@ -824,6 +906,7 @@ export default function App() {
   const handleAutoSaveToggle2 = async () => {
     if (autoSaveEnabled2) {
       autoSavePathRef2.current = '';
+      autoSaveBaseLineRef2.current = 0;
       setAutoSaveDisplayPath2('');
       setAutoSaveEnabled2(false);
       showToast('右侧面板自动保存已关闭');
@@ -850,8 +933,19 @@ export default function App() {
       const { invoke } = await import('@tauri-apps/api/core');
       if (logs2.length > 0) {
         await invoke('write_file', { path, content: logs2.join('\n') + '\n' });
+        autoSaveBaseLineRef2.current = logs2BaseLineRef.current;
       } else {
         await invoke('write_file', { path, content: '' });
+        autoSaveBaseLineRef2.current = logs2LenRef.current;
+      }
+      if (panel1PortConnected) {
+        await invoke('start_serial_reader', {
+          port,
+          timestampEnabled,
+          maxLines,
+          panel: 1,
+          autoSavePath: path,
+        });
       }
       autoSavePathRef2.current = path;
       setAutoSaveDisplayPath2(path);
@@ -871,6 +965,53 @@ export default function App() {
       console.error('Reveal error:', e);
     }
   };
+
+  const handleLoadLogWindow = useCallback(async (panel: 0 | 1, centerLine: number): Promise<boolean> => {
+    const path = panel === 0 ? autoSavePathRef.current : autoSavePathRef2.current;
+    const fileBaseLine = panel === 0 ? autoSaveBaseLineRef.current : autoSaveBaseLineRef2.current;
+    if (!path) {
+      showToast('当前日志已被显示缓存裁剪，且未开启自动保存，无法回读定位');
+      return false;
+    }
+
+    try {
+      const { invoke } = await import('@tauri-apps/api/core');
+      if (centerLine < fileBaseLine) {
+        showToast('目标日志早于当前自动保存文件，无法回读定位');
+        return false;
+      }
+      const before = Math.floor(maxLines / 2);
+      const after = Math.max(0, maxLines - before - 1);
+      const win = await invoke<LogWindow>('read_log_window', {
+        path,
+        centerLine: centerLine - fileBaseLine,
+        before,
+        after,
+      });
+
+      if (win.lines.length === 0) {
+        showToast('自动保存文件中未找到目标日志行');
+        return false;
+      }
+
+      if (panel === 0) {
+        const absoluteStart = fileBaseLine + win.start_line;
+        logsBaseLineRef.current = absoluteStart;
+        setLogsBaseLine(absoluteStart);
+        setLogs(win.lines);
+      } else {
+        const absoluteStart = fileBaseLine + win.start_line;
+        logs2BaseLineRef.current = absoluteStart;
+        setLogs2BaseLine(absoluteStart);
+        setLogs2(win.lines);
+      }
+      return true;
+    } catch (e) {
+      console.error('Load log window error:', e);
+      showToast(`回读日志失败: ${e}`);
+      return false;
+    }
+  }, [maxLines]);
 
   const handleExportHci = async () => {
     try {
@@ -1068,6 +1209,7 @@ export default function App() {
   const handleAutoSaveToggle = async () => {
     if (autoSaveEnabled) {
       autoSavePathRef.current = '';
+      autoSaveBaseLineRef.current = 0;
       setAutoSaveDisplayPath('');
       setAutoSaveEnabled(false);
       showToast('自动保存已关闭');
@@ -1094,8 +1236,19 @@ export default function App() {
       const { invoke } = await import('@tauri-apps/api/core');
       if (logs.length > 0) {
         await invoke('write_file', { path, content: logs.join('\n') + '\n' });
+        autoSaveBaseLineRef.current = logsBaseLineRef.current;
       } else {
         await invoke('write_file', { path, content: '' });
+        autoSaveBaseLineRef.current = logsLenRef.current;
+      }
+      if (panel0PortConnected) {
+        await invoke('start_serial_reader', {
+          port,
+          timestampEnabled,
+          maxLines,
+          panel: 0,
+          autoSavePath: path,
+        });
       }
       autoSavePathRef.current = path;
       setAutoSaveDisplayPath(path);
@@ -1131,16 +1284,21 @@ export default function App() {
     return () => document.removeEventListener('keydown', handleKeyDown, true);
   }, [dualPanelMode, filterEnabled, filterRules]);
 
+  const filteredLogTexts = useMemo(() => filteredLogEntries.map(e => e.text), [filteredLogEntries]);
+  const filteredLogIndices = useMemo(() => filteredLogEntries.map(e => e.idx), [filteredLogEntries]);
+  const filteredLogTexts2 = useMemo(() => filteredLogEntries2.map(e => e.text), [filteredLogEntries2]);
+  const filteredLogIndices2 = useMemo(() => filteredLogEntries2.map(e => e.idx), [filteredLogEntries2]);
+
   // Helper: get lines for a specific view
   const getLinesForView = useCallback((viewId: string): string[] => {
     if (viewId === 'view1') {
-      return getFilteredLogsForSearch(logs, filterEnabled, filterRules);
+      return filterEnabled ? filteredLogTexts : [];
     }
     if (viewId === 'view3') {
-      return getFilteredLogsForSearch(logs2, filterEnabled, filterRules);
+      return filterEnabled ? filteredLogTexts2 : [];
     }
     return viewId === 'view2' ? logs2 : logs;
-  }, [logs, logs2, filterEnabled, filterRules]);
+  }, [logs, logs2, filterEnabled, filteredLogTexts, filteredLogTexts2]);
 
   // Listen for LC3 window port changes (auto-update connected ports in main window)
   useEffect(() => {
@@ -1446,6 +1604,10 @@ export default function App() {
               portTypes={portTypes}
               portDescriptions={portDescriptions}
               fontSize={fontSize}
+              logBaseIndex={logsBaseLine}
+              filteredLogsOverride={filteredLogTexts}
+              filteredIndicesOverride={filteredLogIndices}
+              onLoadLogWindow={handleLoadLogWindow}
               panelIndex={0}
               searchQuery={searchQuery}
               searchMode={searchMode}
@@ -1481,6 +1643,10 @@ export default function App() {
               portTypes={portTypes}
               portDescriptions={portDescriptions}
               fontSize={fontSize}
+              logBaseIndex={logsBaseLine}
+              filteredLogsOverride={filteredLogTexts}
+              filteredIndicesOverride={filteredLogIndices}
+              onLoadLogWindow={handleLoadLogWindow}
               panelIndex={0}
                 searchQuery={searchQuery}
                 searchMode={searchMode}
@@ -1514,6 +1680,10 @@ export default function App() {
                 portTypes={portTypes}
                 portDescriptions={portDescriptions}
                 fontSize={fontSize}
+                logBaseIndex={logs2BaseLine}
+                filteredLogsOverride={filteredLogTexts2}
+                filteredIndicesOverride={filteredLogIndices2}
+                onLoadLogWindow={handleLoadLogWindow}
                 panelIndex={1}
                 searchQuery={searchQuery}
                 searchMode={searchMode}
