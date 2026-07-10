@@ -1,5 +1,6 @@
 use anyhow::{Result, anyhow};
 use serialport::SerialPort;
+use std::io;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -33,11 +34,13 @@ impl SerialPortHandle {
         Ok(())
     }
 
-    pub fn read(&self, buf: &mut [u8]) -> Result<usize> {
-        let mut port = self.port.lock().map_err(|e| anyhow!("Lock error: {}", e))?;
-        let n = port.read(buf)
-            .map_err(|e| anyhow!("Read error: {}", e))?;
-        Ok(n)
+    /// Reads data, returning the raw `io::Result` so the caller can inspect
+    /// `ErrorKind` / `raw_os_error()` to distinguish a normal read timeout
+    /// (`ErrorKind::TimedOut`) from a fatal device-removed error (raw OS
+    /// errors 2/3/5 on Windows), enabling event-driven disconnect detection.
+    pub fn read(&self, buf: &mut [u8]) -> io::Result<usize> {
+        let mut port = self.port.lock().map_err(|e| io::Error::other(e.to_string()))?;
+        port.read(buf)
     }
 
     pub fn available(&self) -> Result<usize> {

@@ -2,12 +2,13 @@ use crate::core::serial::port::SerialPortHandle;
 use crate::{AppState, SerialReaderConfig, SerialReaderControl};
 use chrono::Local;
 use serde::{Deserialize, Serialize};
+use std::io;
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
-use tauri::{Manager, State};
+use tauri::{Emitter, Manager, State};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SerialPortInfo {
@@ -253,6 +254,49 @@ fn stop_serial_reader_inner(state: &AppState, port: &str) -> Result<(), String> 
     Ok(())
 }
 
+/// Threshold of consecutive fatal read errors before declaring the port
+/// physically disconnected (guards against a single transient glitch).
+const DISCONNECT_THRESHOLD: u32 = 3;
+
+/// Returns true when the read error indicates the device has gone away (USB
+/// unplugged / port disabled), as opposed to a normal read timeout. On Windows
+/// these surface as OS error codes:
+///   ERROR_FILE_NOT_FOUND (2), ERROR_PATH_NOT_FOUND (3), ERROR_ACCESS_DENIED (5).
+/// A plain `ErrorKind::TimedOut` (no data yet) returns false.
+fn is_fatal_disconnect(err: &io::Error) -> bool {
+    // raw_os_error is the most reliable cross-cause signal on Windows COM ports.
+    if let Some(code) = err.raw_os_error() {
+        return matches!(code, 2 | 3 | 5);
+    }
+    // Fallback: some serialport builds surface NoDevice via ErrorKind.
+    matches!(err.kind(), io::ErrorKind::NotFound)
+}
+
+/// Tear down the backend state for a port that has been detected as
+/// physically disconnected, and notify the frontend via a one-shot event
+/// (event-driven, no polling). Lock order matches `close_serial_port`:
+/// connected_ports → serial_readers → serial_ports.
+fn handle_disconnect(
+    app_handle: &tauri::AppHandle,
+    state: &AppState,
+    port: &str,
+    stop: Arc<AtomicBool>,
+) {
+    stop.store(true, Ordering::Relaxed);
+    if let Ok(mut connected) = state.connected_ports.lock() {
+        connected.retain(|p| p != port);
+    }
+    if let Ok(mut readers) = state.serial_readers.lock() {
+        readers.remove(port);
+    }
+    if let Ok(mut ports) = state.serial_ports.lock() {
+        ports.remove(port);
+    }
+    // Notify the frontend — it removes the port from connectedPorts, which
+    // flips the dropdown's green dot to "disconnected" without any polling.
+    let _ = app_handle.emit("serial-disconnected", port);
+}
+
 #[tauri::command]
 pub fn open_serial_port(
     port: String,
@@ -337,15 +381,42 @@ pub fn start_serial_reader(
             let mut buf = vec![0u8; 4096];
             let mut line_buf: Vec<u8> = Vec::with_capacity(256);
             let mut line_timestamp: Option<String> = None;
+            // Consecutive fatal read-error counter. A normal read timeout
+            // (no data) resets this to 0; only repeated device-removed errors
+            // accumulate toward triggering a disconnect.
+            let mut fatal_streak: u32 = 0;
 
             while !stop.load(Ordering::Relaxed) {
                 let bytes_read = match serial_port.read(&mut buf) {
                     Ok(n) => n,
-                    Err(_) => {
+                    Err(e) if e.kind() == io::ErrorKind::TimedOut => {
+                        // No data yet — normal, high-frequency. Don't treat as disconnect.
+                        fatal_streak = 0;
+                        thread::sleep(Duration::from_millis(2));
+                        continue;
+                    }
+                    Err(e) => {
+                        // Non-timeout error (e.g. USB unplugged). Only fire a
+                        // disconnect after a few consecutive fatal errors to
+                        // avoid acting on a transient glitch; other transient
+                        // errors just back off and retry.
+                        if is_fatal_disconnect(&e) {
+                            fatal_streak = fatal_streak.saturating_add(1);
+                            if fatal_streak >= DISCONNECT_THRESHOLD {
+                                let state = app_handle.state::<AppState>();
+                                handle_disconnect(&app_handle, &state, &port, stop.clone());
+                                break;
+                            }
+                        } else {
+                            fatal_streak = 0;
+                        }
                         thread::sleep(Duration::from_millis(2));
                         continue;
                     }
                 };
+
+                // A successful read resets the fatal-error streak.
+                fatal_streak = 0;
 
                 if bytes_read == 0 {
                     continue;

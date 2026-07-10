@@ -928,11 +928,22 @@ export default function App() {
     return '';
   };
 
-  const handleSave = async () => {
+  const handleSave = async (opts: { panel: 0 | 1; isFilter: boolean }) => {
+    const { panel, isFilter } = opts;
     try {
       const { save } = await import('@tauri-apps/plugin-dialog');
-      const timestamp = getEarliestTimestamp(logs) || new Date();
-      const defaultName = generateLogFileName(logDisplayPort || 'unknown', timestamp);
+      const source = panel === 1 ? logs2 : logs;
+      const port = (panel === 1 ? logDisplayPort2 : logDisplayPort) || 'unknown';
+      // For the filter view, save only the lines that match the active filter
+      // rules — i.e. exactly what the filtered sub-window displays.
+      const toSave = isFilter
+        ? source.filter(l => matchesFilterRules(l, filterRules))
+        : source;
+      const timestamp = getEarliestTimestamp(source) || new Date();
+      // Add an "_filter" suffix to the port segment of the filename so the
+      // filtered-window save is distinguishable from the full-window save.
+      const portSegment = isFilter ? `${port}_filter` : port;
+      const defaultName = generateLogFileName(portSegment, timestamp);
       const defaultDir = logSaveDir || '';
       const defaultPath = defaultDir ? `${defaultDir}\\${defaultName}` : defaultName;
 
@@ -946,7 +957,7 @@ export default function App() {
       if (!path) return;
 
       const { invoke } = await import('@tauri-apps/api/core');
-      await invoke('write_file', { path, content: logs.join('\n') });
+      await invoke('write_file', { path, content: toSave.join('\n') });
       showToast(`日志已保存`);
     } catch (e) {
       console.error('Save error:', e);
@@ -1368,6 +1379,27 @@ export default function App() {
     return () => { unlisten?.(); };
   }, [logDisplayPort, logDisplayPort2]);
 
+  // Listen for backend-driven serial disconnect events (e.g. USB unplugged).
+  // Event-driven: no polling timer, so it adds zero main-thread cost and never
+  // makes window dragging / serial-port interaction feel laggy. When the
+  // backend reader detects a fatal read error, it tears down the port and
+  // emits "serial-disconnected"; here we drop it from connectedPorts, which
+  // flips the dropdown green dot to "disconnected" automatically. The reader
+  // start/stop effects above react to panel*PortConnected going false and
+  // stop the (already-exited) backend reader cleanly.
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    listen<string>('serial-disconnected', (event) => {
+      const port = event.payload;
+      if (!port) return;
+      setConnectedPorts(prev => prev.filter(p => p !== port));
+      if (port === logDisplayPort || port === logDisplayPort2) {
+        showToast(`串口 ${port} 已断开`);
+      }
+    }).then(fn => { unlisten = fn; });
+    return () => { unlisten?.(); };
+  }, [logDisplayPort, logDisplayPort2]);
+
   // Search function using frontend WebAssembly
   const handleSearch = useCallback(async (query: string, mode: string, caseSensitive: boolean) => {
     if (!query) {
@@ -1725,7 +1757,7 @@ export default function App() {
                 isConnected={connectedPorts.length > 0}
                 logs={logs2}
                 onClear={() => handleClearLogs(1)}
-                onSave={() => showToast('日志已保存')}
+                onSave={handleSave}
                 autoSaveEnabled={autoSaveEnabled2}
                 onAutoSaveToggle={handleAutoSaveToggle2}
                 autoSaveFilePath={autoSaveDisplayPath2}

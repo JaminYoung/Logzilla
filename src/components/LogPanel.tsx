@@ -396,7 +396,7 @@ interface LogPanelProps {
   isConnected: boolean;
   logs: string[];
   onClear: () => void;
-  onSave: () => void;
+  onSave: (opts: { panel: 0 | 1; isFilter: boolean }) => void;
   autoSaveEnabled?: boolean;
   onAutoSaveToggle?: () => void;
   selectedPort?: string;
@@ -649,7 +649,10 @@ export function LogPanel({
 
   const handleCtxSave = () => {
     setCtxMenu(null);
-    onSave();
+    // isFilter: right-click landed on the filtered (lower) sub-view. The
+    // viewId for the filter view is always viewIdBase+1 (odd), matching the
+    // "定位日志" gating logic above.
+    onSave({ panel: panelIndex, isFilter: ctxViewIdRef.current % 2 === 1 });
   };
 
   const handleCtxExportHci = () => {
@@ -827,7 +830,7 @@ export function LogPanel({
         boxShadow: 'var(--shadow-md)'
       }}
     >
-      
+
       {/* Toolbar */}
       <div className="flex items-center gap-2 p-3 pb-2 relative z-10">
         {/* Port selector */}
