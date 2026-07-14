@@ -11,6 +11,7 @@ import { StatusBar } from './components/StatusBar';
 import { ToastContainer } from './components/Toast';
 import { FilterSettingsDialog, type FilterRule } from './components/FilterSettingsDialog';
 import { HighlightSettingsDialog, type HighlightRule } from './components/HighlightSettingsDialog';
+import { ConfirmDialog } from './components/ConfirmDialog';
 import { SearchBar, type SearchScope } from './components/SearchBar';
 import { listen, emit } from '@tauri-apps/api/event';
 import LC3ToolKitApp from './components/LC3ToolKit/LC3ToolKitApp';
@@ -165,6 +166,7 @@ export default function App() {
   const maxLines = Math.max(1, maxCacheKb) * 1000;
   const maxFilterLines = maxLines;
   const [pollIntervalMs, setPollIntervalMs] = useState(50);
+  const [hciTimezoneOffset, setHciTimezoneOffset] = useState(0);
   const [autoSaveEnabled, setAutoSaveEnabled] = useState(false);
   const [autoSaveEnabled2, setAutoSaveEnabled2] = useState(false);
   const [autoSaveDisplayPath, setAutoSaveDisplayPath] = useState('');
@@ -194,6 +196,7 @@ export default function App() {
   const logsBaseLineRef = useRef(0);
   const logs2BaseLineRef = useRef(0);
   const [usbAudioDialogOpen, setUsbAudioDialogOpen] = useState(false);
+  const [hciExtractConfirm, setHciExtractConfirm] = useState<{ path: string; fileName: string } | null>(null);
   useWindowMoving(300);
 
   const autoSavePathRef = useRef('');
@@ -296,6 +299,11 @@ export default function App() {
       if (savedMaxCache !== null) setMaxCacheKb(JSON.parse(savedMaxCache));
       const savedPollMs = localStorage.getItem('logzilla_pollIntervalMs');
       if (savedPollMs !== null) setPollIntervalMs(JSON.parse(savedPollMs));
+      const savedHciTz = localStorage.getItem('logzilla_hciTimezoneOffset');
+      if (savedHciTz !== null) {
+        const tz = JSON.parse(savedHciTz);
+        if (typeof tz === 'number' && tz >= -12 && tz <= 14) setHciTimezoneOffset(tz);
+      }
       const savedWpsPath = localStorage.getItem('logzilla_wpsPath');
       if (savedWpsPath) setWpsPath(savedWpsPath);
     } catch {}
@@ -311,6 +319,7 @@ export default function App() {
   useEffect(() => { localStorage.setItem('logzilla_fontSize', fontSize); }, [fontSize]);
   useEffect(() => { localStorage.setItem('logzilla_maxCacheKb', JSON.stringify(maxCacheKb)); }, [maxCacheKb]);
   useEffect(() => { localStorage.setItem('logzilla_pollIntervalMs', JSON.stringify(pollIntervalMs)); }, [pollIntervalMs]);
+  useEffect(() => { localStorage.setItem('logzilla_hciTimezoneOffset', JSON.stringify(hciTimezoneOffset)); }, [hciTimezoneOffset]);
   useEffect(() => { localStorage.setItem('logzilla_wpsPath', wpsPath); }, [wpsPath]);
 
   useEffect(() => {
@@ -1079,7 +1088,10 @@ export default function App() {
     try {
       const { invoke } = await import('@tauri-apps/api/core');
       if (autoSaveEnabled && autoSavePathRef.current) {
-        const result = await invoke<string>('extract_hci', { inputPath: autoSavePathRef.current });
+        const result = await invoke<string>('extract_hci', {
+          inputPath: autoSavePathRef.current,
+          timezoneOffsetHours: hciTimezoneOffset,
+        });
         showToast(result);
       } else {
         const { save } = await import('@tauri-apps/plugin-dialog');
@@ -1093,7 +1105,10 @@ export default function App() {
         });
         if (!path) return;
         await invoke('write_file', { path, content: logs.join('\n') });
-        const result = await invoke<string>('extract_hci', { inputPath: path });
+        const result = await invoke<string>('extract_hci', {
+          inputPath: path,
+          timezoneOffsetHours: hciTimezoneOffset,
+        });
         showToast(result);
       }
     } catch (e) {
@@ -1106,7 +1121,10 @@ export default function App() {
     try {
       const { invoke } = await import('@tauri-apps/api/core');
       if (autoSaveEnabled2 && autoSavePathRef2.current) {
-        const result = await invoke<string>('extract_hci', { inputPath: autoSavePathRef2.current });
+        const result = await invoke<string>('extract_hci', {
+          inputPath: autoSavePathRef2.current,
+          timezoneOffsetHours: hciTimezoneOffset,
+        });
         showToast(result);
       } else {
         const { save } = await import('@tauri-apps/plugin-dialog');
@@ -1120,7 +1138,10 @@ export default function App() {
         });
         if (!path) return;
         await invoke('write_file', { path, content: logs2.join('\n') });
-        const result = await invoke<string>('extract_hci', { inputPath: path });
+        const result = await invoke<string>('extract_hci', {
+          inputPath: path,
+          timezoneOffsetHours: hciTimezoneOffset,
+        });
         showToast(result);
       }
     } catch (e) {
@@ -1139,6 +1160,36 @@ export default function App() {
     }
   };
 
+  const runHciExtract = async (inputPath: string) => {
+    try {
+      const { invoke } = await import('@tauri-apps/api/core');
+      const result = await invoke<string>('extract_hci', {
+        inputPath,
+        timezoneOffsetHours: hciTimezoneOffset,
+      });
+      showToast(result);
+    } catch (e) {
+      console.error('HCI extract error:', e);
+      showToast(`HCI日志提取失败: ${e}`);
+    }
+  };
+
+  const confirmAndExtractHci = async (inputPath: string) => {
+    const fileName = inputPath.split(/[/\\]/).pop() || inputPath;
+    setHciExtractConfirm({ path: inputPath, fileName });
+  };
+
+  const handleHciExtractConfirm = async () => {
+    const pending = hciExtractConfirm;
+    setHciExtractConfirm(null);
+    if (!pending) return;
+    await runHciExtract(pending.path);
+  };
+
+  const handleHciExtractCancel = () => {
+    setHciExtractConfirm(null);
+  };
+
   const handleHciExtract = async () => {
     try {
       const { open } = await import('@tauri-apps/plugin-dialog');
@@ -1150,15 +1201,24 @@ export default function App() {
         }]
       });
       if (!selected) return;
-      const inputPath = selected as string;
-
-      const { invoke } = await import('@tauri-apps/api/core');
-      const result = await invoke<string>('extract_hci', { inputPath });
-      showToast(result);
+      await confirmAndExtractHci(selected as string);
     } catch (e) {
       console.error('HCI extract error:', e);
       showToast(`HCI日志提取失败: ${e}`);
     }
+  };
+
+  const handleHciExtractFromPath = async (inputPath: string) => {
+    if (!inputPath) {
+      showToast('无法识别拖入的文件路径，请拖入本地 .txt / .log 文件');
+      return;
+    }
+    const lower = inputPath.toLowerCase();
+    if (!lower.endsWith('.txt') && !lower.endsWith('.log')) {
+      showToast('请拖入 .txt 或 .log 日志文件');
+      return;
+    }
+    await confirmAndExtractHci(inputPath);
   };
 
   const liveImportBgRef = useRef<number | null>(null);
@@ -1811,12 +1871,15 @@ export default function App() {
         logSaveDir={logSaveDir}
         onSelectLogDir={handleSelectLogDir}
         onHciExtract={handleHciExtract}
+        onHciExtractFromPath={handleHciExtractFromPath}
         fontSize={fontSize}
         onFontSizeChange={setFontSize}
         maxCacheKb={maxCacheKb}
         onMaxCacheKbChange={setMaxCacheKb}
         pollIntervalMs={pollIntervalMs}
         onPollIntervalMsChange={setPollIntervalMs}
+        hciTimezoneOffset={hciTimezoneOffset}
+        onHciTimezoneOffsetChange={setHciTimezoneOffset}
         wpsPath={wpsPath}
         liveImportEnabled={liveImportEnabled}
         liveImportStatus={liveImportStatus}
@@ -1841,6 +1904,19 @@ export default function App() {
       />
 
       <ToastContainer toasts={toasts} onDismiss={(id) => setToasts(prev => prev.filter(t => t.id !== id))} />
+
+      <ConfirmDialog
+        isOpen={!!hciExtractConfirm}
+        title="HCI日志提取"
+        message="确认从以下日志提取 HCI 数据包？"
+        fileName={hciExtractConfirm?.fileName}
+        detail={hciExtractConfirm?.path}
+        hint="将在同目录生成 .cfa 文件"
+        confirmLabel="提取"
+        cancelLabel="取消"
+        onConfirm={handleHciExtractConfirm}
+        onCancel={handleHciExtractCancel}
+      />
 
       <FilterSettingsDialog
         isOpen={filterDialogOpen}

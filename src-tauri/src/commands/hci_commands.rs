@@ -6,6 +6,37 @@ struct HciPacket {
     data: Vec<u8>,
 }
 
+/// Wall-clock time of day with millisecond precision.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TimeOfDay {
+    h: u32,
+    m: u32,
+    s: u32,
+    ms: u32,
+}
+
+impl TimeOfDay {
+    fn total_ms(self) -> i64 {
+        ((self.h as i64) * 3600 + (self.m as i64) * 60 + (self.s as i64)) * 1000 + self.ms as i64
+    }
+
+    fn from_total_ms(total: i64) -> Self {
+        // Keep within a single day for wall-clock display; wrap if needed.
+        let day = 24 * 3600 * 1000;
+        let mut t = total % day;
+        if t < 0 {
+            t += day;
+        }
+        let ms = (t % 1000) as u32;
+        let sec_total = t / 1000;
+        let s = (sec_total % 60) as u32;
+        let min_total = sec_total / 60;
+        let m = (min_total % 60) as u32;
+        let h = (min_total / 60) as u32;
+        Self { h, m, s, ms }
+    }
+}
+
 fn parse_hex_bytes(s: &str) -> Result<Vec<u8>, String> {
     let hex_str = s.trim();
     if hex_str.is_empty() {
@@ -18,9 +49,6 @@ fn parse_hex_bytes(s: &str) -> Result<Vec<u8>, String> {
 }
 
 /// Offset in microseconds between btsnoop epoch (Jan 1, 0 AD) and Unix epoch (Jan 1, 1970).
-///
-/// The btsnoop format defines timestamps as microseconds since midnight January 1, 0 AD
-/// (nominal Gregorian).  The offset from Unix epoch to O AD is computed via chrono.
 fn btsnoop_epoch_offset_usec() -> u64 {
     let unix_epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1)
         .unwrap()
@@ -39,32 +67,44 @@ fn unix_usec_to_btsnoop(unix_usec: u64) -> u64 {
     unix_usec + *OFFSET
 }
 
-/// Convert a local-time `(HH:MM:SS.mmm)` into btsnoop epoch microseconds.
-fn local_pc_timestamp_to_btsnoop(h: u32, m: u32, s: u32, ms: u32) -> u64 {
-    let now_local = chrono::Local::now();
-    let date = now_local.date_naive();
-    let local_naive = chrono::NaiveDateTime::new(
-        date,
-        chrono::NaiveTime::from_hms_milli_opt(h, m, s, ms).unwrap(),
-    );
-    let utc_dt = local_naive
-        .and_local_timezone(chrono::Local)
-        .unwrap()
-        .with_timezone(&chrono::Utc);
-    let unix_usec = utc_dt.timestamp_micros() as u64;
-    unix_usec_to_btsnoop(unix_usec)
+fn clamp_tz_hours(tz_hours: i32) -> i32 {
+    tz_hours.clamp(-12, 14)
 }
 
-/// Convert a chip-uptime `[HH:MM:SS.mmm]` into btsnoop epoch microseconds
-/// using today's UTC midnight as the reference.
-fn chip_timestamp_to_btsnoop(h: u32, m: u32, s: u32, ms: u32) -> u64 {
-    let now_utc = chrono::Utc::now();
-    let date = now_utc.date_naive();
-    let chip_naive = chrono::NaiveDateTime::new(
+/// Encode a log wall-clock time of day into btsnoop absolute microseconds.
+///
+/// `log_tz_hours` is the timezone of the **computer log** timestamps
+/// (setting “日志时区”, default +8). The wall-clock is interpreted as local
+/// time in that fixed offset, then converted to true UTC for btsnoop storage.
+///
+/// Viewer implications (same absolute instant):
+/// - Frontline showing UTC+8: wall clock matches log when log_tz = +8
+/// - WPS showing UTC0: shows UTC (= wall − log_tz). Set 日志时区 to 0 if you
+///   want WPS to display the same H:M:S digits as the log (no conversion).
+///
+/// Y/M/D uses “today” in the log timezone; only H:M:S.mmm must be accurate.
+fn wall_clock_to_btsnoop(tod: TimeOfDay, log_tz_hours: i32) -> u64 {
+    let log_tz_hours = clamp_tz_hours(log_tz_hours);
+    let offset_secs = log_tz_hours * 3600;
+    let offset = chrono::FixedOffset::east_opt(offset_secs)
+        .or_else(|| chrono::FixedOffset::east_opt(0))
+        .unwrap();
+
+    // Calendar date from "today" in the log timezone (Y/M/D not critical).
+    let date = chrono::Utc::now().with_timezone(&offset).date_naive();
+    let naive = chrono::NaiveDateTime::new(
         date,
-        chrono::NaiveTime::from_hms_milli_opt(h, m, s, ms).unwrap(),
+        chrono::NaiveTime::from_hms_milli_opt(tod.h, tod.m, tod.s, tod.ms)
+            .unwrap_or_else(|| chrono::NaiveTime::from_hms_milli_opt(0, 0, 0, 0).unwrap()),
     );
-    let unix_usec = chip_naive.and_utc().timestamp_micros() as u64;
+
+    // Interpret wall clock as local time in log timezone → absolute UTC.
+    let dt = naive
+        .and_local_timezone(offset)
+        .single()
+        .or_else(|| naive.and_local_timezone(offset).earliest())
+        .unwrap_or_else(|| naive.and_utc().fixed_offset());
+    let unix_usec = dt.timestamp_micros() as u64;
     unix_usec_to_btsnoop(unix_usec)
 }
 
@@ -77,86 +117,134 @@ fn write_btsnoop<W: Write>(writer: &mut W, packets: &[HciPacket]) -> Result<(), 
     for pkt in packets {
         let packet_len = pkt.data.len() as u32;
 
-        writer.write_all(&packet_len.to_be_bytes()).map_err(|e| e.to_string())?;
-        writer.write_all(&packet_len.to_be_bytes()).map_err(|e| e.to_string())?;
-        writer.write_all(&pkt.flags.to_be_bytes()).map_err(|e| e.to_string())?;
-        writer.write_all(&0u32.to_be_bytes()).map_err(|e| e.to_string())?;
-        writer.write_all(&pkt.timestamp_usec.to_be_bytes()).map_err(|e| e.to_string())?;
+        writer
+            .write_all(&packet_len.to_be_bytes())
+            .map_err(|e| e.to_string())?;
+        writer
+            .write_all(&packet_len.to_be_bytes())
+            .map_err(|e| e.to_string())?;
+        writer
+            .write_all(&pkt.flags.to_be_bytes())
+            .map_err(|e| e.to_string())?;
+        writer
+            .write_all(&0u32.to_be_bytes())
+            .map_err(|e| e.to_string())?;
+        writer
+            .write_all(&pkt.timestamp_usec.to_be_bytes())
+            .map_err(|e| e.to_string())?;
         writer.write_all(&pkt.data).map_err(|e| e.to_string())?;
     }
 
     Ok(())
 }
 
-/// Parse a single HCI log line, prepending the H4 type indicator byte.
+/// Parse optional PC `(HH:MM:SS.mmm)` at the start of a line.
+/// Returns (pc_ts, remainder after PC timestamp).
+fn parse_pc_timestamp_prefix(line: &str) -> (Option<TimeOfDay>, &str) {
+    let line = line.trim_start();
+    if !line.starts_with('(') {
+        return (None, line);
+    }
+    let Some(close_paren) = line.find(')') else {
+        return (None, line);
+    };
+    let ts_str = &line[1..close_paren];
+    if ts_str.len() != 12 || !ts_str.is_ascii() {
+        return (None, line);
+    }
+    // Require colon/dot separators: HH:MM:SS.mmm
+    if ts_str.as_bytes()[2] != b':'
+        || ts_str.as_bytes()[5] != b':'
+        || ts_str.as_bytes()[8] != b'.'
+    {
+        return (None, line);
+    }
+    let Ok(h) = ts_str[0..2].parse::<u32>() else {
+        return (None, line);
+    };
+    let Ok(m) = ts_str[3..5].parse::<u32>() else {
+        return (None, line);
+    };
+    let Ok(s) = ts_str[6..8].parse::<u32>() else {
+        return (None, line);
+    };
+    let Ok(ms) = ts_str[9..12].parse::<u32>() else {
+        return (None, line);
+    };
+    if h > 23 || m > 59 || s > 59 || ms > 999 {
+        return (None, line);
+    }
+    (
+        Some(TimeOfDay { h, m, s, ms }),
+        line[close_paren + 1..].trim_start(),
+    )
+}
+
+/// Parse optional chip `[HH:MM:SS.mmm]` at the start of remainder.
+fn parse_chip_timestamp_prefix(remaining: &str) -> (Option<TimeOfDay>, &str) {
+    let remaining = remaining.trim_start();
+    if !remaining.starts_with('[') {
+        return (None, remaining);
+    }
+    let Some(close_bracket) = remaining.find(']') else {
+        return (None, remaining);
+    };
+    let ts_part = &remaining[1..close_bracket];
+    if ts_part.len() != 12 || !ts_part.is_ascii() {
+        return (None, remaining);
+    }
+    if ts_part.as_bytes()[2] != b':'
+        || ts_part.as_bytes()[5] != b':'
+        || ts_part.as_bytes()[8] != b'.'
+    {
+        return (None, remaining);
+    }
+    let Ok(h) = ts_part[0..2].parse::<u32>() else {
+        return (None, remaining);
+    };
+    let Ok(m) = ts_part[3..5].parse::<u32>() else {
+        return (None, remaining);
+    };
+    let Ok(s) = ts_part[6..8].parse::<u32>() else {
+        return (None, remaining);
+    };
+    let Ok(ms) = ts_part[9..12].parse::<u32>() else {
+        return (None, remaining);
+    };
+    if h > 23 || m > 59 || s > 59 || ms > 999 {
+        return (None, remaining);
+    }
+    (
+        Some(TimeOfDay { h, m, s, ms }),
+        remaining[close_bracket + 1..].trim_start(),
+    )
+}
+
+/// Parse a single HCI packet line into (pc, chip, flags, h4_data).
 ///
 /// Accepts:
-///   (15:20:52.807) [00:00:19.017] CMD => 03 0c 00    → data: 01 03 0c 00
-///   [00:00:19.017] CMD => 03 0c 00                    → data: 01 03 0c 00
-///   CMD => 03 0c 00                                   → data: 01 03 0c 00 (ts = None)
-///
-/// The timestamp is `Option<u64>`: `Some` when the line carries a PC `(…)` and/or
-/// chip `[…]` timestamp; `None` when it's a valid HCI packet but has no timestamp
-/// (the caller in `extract_hci` carries forward the last seen timestamp).
+///   (15:20:52.807) [00:00:19.017] CMD => 03 0c 00
+///   [00:00:19.017] CMD => 03 0c 00
+///   CMD => 03 0c 00
 ///
 /// H4 mapping: CMD → 0x01, ACL → 0x02, EVT → 0x04
-fn parse_hci_line(line: &str) -> Option<(Option<u64>, u32, Vec<u8>)> {
+fn parse_hci_line(
+    line: &str,
+) -> Option<(Option<TimeOfDay>, Option<TimeOfDay>, u32, Vec<u8>)> {
     let line = line.trim();
     if line.is_empty() {
         return None;
     }
 
-    // ---- optional PC timestamp (HH:MM:SS.mmm) at line start ----
-    let remaining: &str;
-    let pc_ts: Option<(u32, u32, u32, u32)>;
-
-    if line.starts_with('(') {
-        let close_paren = line.find(')')?;
-        let ts_str = &line[1..close_paren];
-        if ts_str.len() != 12 || !ts_str.is_ascii() {
-            return None;
-        }
-        let h: u32 = ts_str[0..2].parse().ok()?;
-        let m: u32 = ts_str[3..5].parse().ok()?;
-        let s: u32 = ts_str[6..8].parse().ok()?;
-        let ms: u32 = ts_str[9..12].parse().ok()?;
-        pc_ts = Some((h, m, s, ms));
-        remaining = line[close_paren + 1..].trim_start();
-    } else {
-        pc_ts = None;
-        remaining = line;
-    }
-
-    // ---- optional chip timestamp [HH:MM:SS.mmm] ----
-    let chip_ts: Option<(u32, u32, u32, u32)>;
-    let rest: &str;
-    if remaining.starts_with('[') {
-        let close_bracket = remaining.find(']')?;
-        let ts_part = &remaining[1..close_bracket];
-        if ts_part.len() != 12 || !ts_part.is_ascii() {
-            return None;
-        }
-        let chip_h: u32 = ts_part[0..2].parse().ok()?;
-        let chip_m: u32 = ts_part[3..5].parse().ok()?;
-        let chip_s: u32 = ts_part[6..8].parse().ok()?;
-        let chip_ms: u32 = ts_part[9..12].parse().ok()?;
-        chip_ts = Some((chip_h, chip_m, chip_s, chip_ms));
-        rest = remaining[close_bracket + 1..].trim_start();
-    } else {
-        chip_ts = None;
-        rest = remaining;
-    }
+    let (pc_ts, remaining) = parse_pc_timestamp_prefix(line);
+    let (chip_ts, rest) = parse_chip_timestamp_prefix(remaining);
     if rest.len() < 6 {
         return None;
     }
 
-    // Packet type
     let space_after_type = rest.find(' ')?;
     let pkt_type = &rest[..space_after_type];
-
     let after_type = rest[space_after_type + 1..].trim_start();
-
-    // Direction
     if after_type.len() < 2 {
         return None;
     }
@@ -167,7 +255,6 @@ fn parse_hci_line(line: &str) -> Option<(Option<u64>, u32, Vec<u8>)> {
         _ => return None,
     };
 
-    // Hex data (without H4 prefix)
     let hex_part = after_type[2..].trim();
     if hex_part.is_empty() {
         return None;
@@ -177,9 +264,6 @@ fn parse_hci_line(line: &str) -> Option<(Option<u64>, u32, Vec<u8>)> {
         return None;
     }
 
-    // Determine flags and H4 type indicator
-    // 0 = HCI Command (sent), 1 = HCI Event (received),
-    // 2 = ACL Data (sent), 3 = ACL Data (received)
     let (flags, h4_type): (u32, u8) = match (pkt_type, direction_sent) {
         ("CMD", true) => (0, 0x01),
         ("EVT", false) => (1, 0x04),
@@ -188,39 +272,141 @@ fn parse_hci_line(line: &str) -> Option<(Option<u64>, u32, Vec<u8>)> {
         _ => return None,
     };
 
-    // Prepend H4 type indicator to packet data
     let mut data_with_h4 = Vec::with_capacity(1 + raw_bytes.len());
     data_with_h4.push(h4_type);
     data_with_h4.extend_from_slice(&raw_bytes);
 
-    // Timestamp: PC ts preferred, else chip ts, else None (caller carries forward).
-    let timestamp: Option<u64> = match (pc_ts, chip_ts) {
-        (Some((h, m, s, ms)), _) => Some(local_pc_timestamp_to_btsnoop(h, m, s, ms)),
-        (None, Some((h, m, s, ms))) => Some(chip_timestamp_to_btsnoop(h, m, s, ms)),
-        (None, None) => None,
-    };
+    Some((pc_ts, chip_ts, flags, data_with_h4))
+}
 
-    Some((timestamp, flags, data_with_h4))
+/// Track last seen PC wall-clock and optional chip anchor for delta carry.
+struct TimestampState {
+    /// Last PC wall-clock time of day (from any line, including non-HCI).
+    last_pc: Option<TimeOfDay>,
+    /// Chip time observed together with `last_pc` (for relative advance).
+    last_pc_chip: Option<TimeOfDay>,
+    /// Last resolved wall-clock used for an HCI packet.
+    last_resolved: Option<TimeOfDay>,
+    /// Chip time at `last_resolved` (for pure chip-only sequences).
+    last_resolved_chip: Option<TimeOfDay>,
+}
+
+impl TimestampState {
+    fn new() -> Self {
+        Self {
+            last_pc: None,
+            last_pc_chip: None,
+            last_resolved: None,
+            last_resolved_chip: None,
+        }
+    }
+
+    /// Observe a PC timestamp from any log line (HCI or non-HCI).
+    fn observe_pc(&mut self, pc: TimeOfDay, chip: Option<TimeOfDay>) {
+        self.last_pc = Some(pc);
+        if let Some(c) = chip {
+            self.last_pc_chip = Some(c);
+        }
+        // A fresh PC reading is also a valid resolved base.
+        self.last_resolved = Some(pc);
+        if let Some(c) = chip {
+            self.last_resolved_chip = Some(c);
+        }
+    }
+
+    /// Resolve wall-clock for one HCI packet.
+    ///
+    /// Priority:
+    /// 1. PC on this HCI line
+    /// 2. Last PC from any prior line, advanced by chip delta when possible
+    /// 3. Advance last resolved HCI time by chip delta
+    /// 4. Chip wall-clock as last resort (only before any PC is seen)
+    fn resolve_hci(
+        &mut self,
+        pc: Option<TimeOfDay>,
+        chip: Option<TimeOfDay>,
+    ) -> Option<TimeOfDay> {
+        if let Some(pc_tod) = pc {
+            self.observe_pc(pc_tod, chip);
+            return Some(pc_tod);
+        }
+
+        // No PC on this HCI line: prefer last PC (+ chip delta).
+        if let Some(base_pc) = self.last_pc {
+            let resolved = match (chip, self.last_pc_chip) {
+                (Some(cur_chip), Some(base_chip)) => {
+                    let delta = cur_chip.total_ms() - base_chip.total_ms();
+                    TimeOfDay::from_total_ms(base_pc.total_ms() + delta)
+                }
+                _ => base_pc,
+            };
+            self.last_resolved = Some(resolved);
+            if let Some(c) = chip {
+                self.last_resolved_chip = Some(c);
+                // Keep chip anchor in sync so subsequent deltas stay continuous.
+                // Do not overwrite last_pc; only update chip anchor relative to last_pc.
+                if self.last_pc_chip.is_none() {
+                    self.last_pc_chip = Some(c);
+                }
+            }
+            return Some(resolved);
+        }
+
+        // Never saw any PC: fall back to chip progression / absolute chip.
+        if let Some(cur_chip) = chip {
+            let resolved = if let (Some(prev_res), Some(prev_chip)) =
+                (self.last_resolved, self.last_resolved_chip)
+            {
+                let delta = cur_chip.total_ms() - prev_chip.total_ms();
+                TimeOfDay::from_total_ms(prev_res.total_ms() + delta)
+            } else {
+                // Absolute chip wall-clock (rare bootstrap case).
+                cur_chip
+            };
+            self.last_resolved = Some(resolved);
+            self.last_resolved_chip = Some(cur_chip);
+            return Some(resolved);
+        }
+
+        self.last_resolved
+    }
 }
 
 #[tauri::command]
-pub fn extract_hci(input_path: String) -> Result<String, String> {
-    // Read raw bytes and decode lossily so non-UTF-8 (e.g. GBK) files don't fail the
-    // whole read. HCI packet lines are pure ASCII and parse correctly; any garbled
-    // non-ASCII lines simply don't match the HCI format and are skipped.
-    let bytes = std::fs::read(&input_path)
-        .map_err(|e| format!("无法读取文件: {}", e))?;
+pub fn extract_hci(
+    input_path: String,
+    timezone_offset_hours: Option<i32>,
+) -> Result<String, String> {
+    // 日志时区：电脑日志墙钟所属时区（默认 UTC+8），导出时转成真 UTC 写入 btsnoop。
+    // 默认 0：按 UTC0 写入墙钟数字，WPS 显示与日志一致；Frontline(UTC+8) 用户可改为 +8。
+    let tz_hours = clamp_tz_hours(timezone_offset_hours.unwrap_or(0));
+
+    let bytes =
+        std::fs::read(&input_path).map_err(|e| format!("无法读取文件: {}", e))?;
     let content = String::from_utf8_lossy(&bytes);
 
     let mut packets: Vec<HciPacket> = Vec::new();
-    let mut last_ts: Option<u64> = None;
+    let mut state = TimestampState::new();
 
     for line in content.lines() {
-        if let Some((ts_opt, flags, data)) = parse_hci_line(line) {
-            // Carry forward the last seen timestamp when this line has none.
-            let ts = ts_opt.or(last_ts);
-            let Some(ts) = ts else { continue; };
-            last_ts = Some(ts);
+        // Always harvest PC timestamps from non-HCI lines too
+        // e.g. "(17:20:54.438) [00:00:03.404] MSG <- 60 01 01"
+        // so the next chip-only HCI line can inherit the PC wall-clock.
+        let (line_pc, after_pc) = parse_pc_timestamp_prefix(line);
+        let (line_chip, _) = parse_chip_timestamp_prefix(after_pc);
+        if let Some(pc) = line_pc {
+            // Only update state here for non-HCI lines; HCI path also updates.
+            // For HCI lines parse_hci_line succeeds and resolve_hci handles it.
+            if parse_hci_line(line).is_none() {
+                state.observe_pc(pc, line_chip);
+            }
+        }
+
+        if let Some((pc_raw, chip_raw, flags, data)) = parse_hci_line(line) {
+            let Some(tod) = state.resolve_hci(pc_raw, chip_raw) else {
+                continue;
+            };
+            let ts = wall_clock_to_btsnoop(tod, tz_hours);
             packets.push(HciPacket {
                 timestamp_usec: ts,
                 flags,
@@ -240,8 +426,8 @@ pub fn extract_hci(input_path: String) -> Result<String, String> {
         format!("{}.cfa", input_path)
     };
 
-    let file = std::fs::File::create(&output_path)
-        .map_err(|e| format!("无法创建输出文件: {}", e))?;
+    let file =
+        std::fs::File::create(&output_path).map_err(|e| format!("无法创建输出文件: {}", e))?;
     let mut writer = std::io::BufWriter::new(file);
     write_btsnoop(&mut writer, &packets)?;
 
@@ -265,7 +451,12 @@ pub fn reveal_in_explorer(path: String) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Timelike;
     use std::path::PathBuf;
+
+    fn tod(h: u32, m: u32, s: u32, ms: u32) -> TimeOfDay {
+        TimeOfDay { h, m, s, ms }
+    }
 
     #[test]
     fn test_extract_from_sample_log() {
@@ -275,51 +466,21 @@ mod tests {
             eprintln!("Sample log not found at {:?}, skipping", sample_path);
             return;
         }
-        let result = extract_hci(sample_path.to_str().unwrap().to_string());
+        let result = extract_hci(sample_path.to_str().unwrap().to_string(), Some(8));
         assert!(result.is_ok(), "extract_hci failed: {:?}", result.err());
         let msg = result.unwrap();
         assert!(msg.contains("个 HCI 数据包"), "Unexpected result: {}", msg);
-        // Verify .cfa file was created
         let cfa_path = sample_path.with_extension("cfa");
         assert!(cfa_path.exists(), "CFA file not created at {:?}", cfa_path);
-        // Read and verify btsnoop format
         let data = std::fs::read(&cfa_path).expect("Failed to read CFA");
         assert!(data.len() > 16, "CFA file too small");
         assert_eq!(&data[0..8], b"btsnoop\0", "Invalid btsnoop magic");
-        // Version = 1
         let mut ver = [0u8; 4];
         ver.copy_from_slice(&data[8..12]);
         assert_eq!(u32::from_be_bytes(ver), 1, "Wrong btsnoop version");
-        // Datalink
         let mut dl = [0u8; 4];
         dl.copy_from_slice(&data[12..16]);
-        let datalink = u32::from_be_bytes(dl);
-        assert_eq!(datalink, 1002, "Expected datalink 1002 (H4), got {}", datalink);
-        // Count packets: each packet has 4 words (16 bytes) header + data
-        let pkt_hdr_size = 24usize; // 4+4+4+4+8
-        let mut pos = 16;
-        let mut pkt_count = 0u32;
-        while pos + pkt_hdr_size <= data.len() {
-            let mut orig_len = [0u8; 4];
-            orig_len.copy_from_slice(&data[pos..pos+4]);
-            let orig = u32::from_be_bytes(orig_len);
-            // included_len at pos+4..pos+8, flags at pos+8..pos+12, drops at pos+12..pos+16, ts at pos+16..pos+24
-            let mut inc_len = [0u8; 4];
-            inc_len.copy_from_slice(&data[pos+4..pos+8]);
-            let inc = u32::from_be_bytes(inc_len);
-            assert_eq!(orig, inc, "original_len != included_len for packet {}", pkt_count);
-            let mut flags_buf = [0u8; 4];
-            flags_buf.copy_from_slice(&data[pos+8..pos+12]);
-            let flags = u32::from_be_bytes(flags_buf);
-            assert!(flags <= 3, "Invalid flags {} for packet {}", flags, pkt_count);
-            let pkt_data_len = orig as usize;
-            assert!(pos + pkt_hdr_size + pkt_data_len <= data.len(), "Packet data exceeds file");
-            // First byte of packet data is the H4 type indicator (0x01/0x02/0x04)
-            pos += pkt_hdr_size + pkt_data_len;
-            pkt_count += 1;
-        }
-        assert!(pkt_count > 0, "No packets found in CFA file");
-        // Cleanup
+        assert_eq!(u32::from_be_bytes(dl), 1002, "Expected datalink 1002 (H4)");
         let _ = std::fs::remove_file(&cfa_path);
     }
 
@@ -328,7 +489,9 @@ mod tests {
         let line = "[00:00:00.107] CMD => 03 0c 00";
         let result = parse_hci_line(line);
         assert!(result.is_some());
-        let (_ts, flags, data) = result.unwrap();
+        let (pc, chip, flags, data) = result.unwrap();
+        assert!(pc.is_none());
+        assert_eq!(chip, Some(tod(0, 0, 0, 107)));
         assert_eq!(flags, 0);
         assert_eq!(&data, &[0x01, 0x03, 0x0c, 0x00]);
     }
@@ -338,17 +501,18 @@ mod tests {
         let line = "[00:00:00.128] EVT <= 0e 04 05 03 0c 00";
         let result = parse_hci_line(line);
         assert!(result.is_some());
-        let (_ts, flags, data) = result.unwrap();
+        let (_pc, _chip, flags, data) = result.unwrap();
         assert_eq!(flags, 1);
         assert_eq!(data[0], 0x04, "EVT should have H4 type 0x04");
     }
 
     #[test]
     fn test_parse_hci_acl_sent() {
-        let line = "[00:00:01.140] ACL => 80 00 10 00 0c 00 01 00 0b 02 08 00 02 00 00 00 80 02 00 00";
+        let line =
+            "[00:00:01.140] ACL => 80 00 10 00 0c 00 01 00 0b 02 08 00 02 00 00 00 80 02 00 00";
         let result = parse_hci_line(line);
         assert!(result.is_some());
-        let (_ts, flags, data) = result.unwrap();
+        let (_pc, _chip, flags, data) = result.unwrap();
         assert_eq!(flags, 2);
         assert_eq!(data[0], 0x02, "ACL should have H4 type 0x02");
     }
@@ -358,17 +522,20 @@ mod tests {
         let line = "[00:00:01.139] ACL <= 80 20 0a 00 06 00 01 00 0a 02 02 00 02 00";
         let result = parse_hci_line(line);
         assert!(result.is_some());
-        let (_ts, flags, data) = result.unwrap();
+        let (_pc, _chip, flags, data) = result.unwrap();
         assert_eq!(flags, 3);
         assert_eq!(data[0], 0x02, "ACL should have H4 type 0x02");
     }
 
     #[test]
     fn test_parse_with_pc_ts() {
-        let line = "(15:20:52.807) [00:00:19.017] ACL <= 80 20 08 00 04 00 42 00 01 53 01 9c";
+        let line =
+            "(15:20:52.807) [00:00:19.017] ACL <= 80 20 08 00 04 00 42 00 01 53 01 9c";
         let result = parse_hci_line(line);
         assert!(result.is_some());
-        let (_ts, flags, data) = result.unwrap();
+        let (pc, chip, flags, data) = result.unwrap();
+        assert_eq!(pc, Some(tod(15, 20, 52, 807)));
+        assert_eq!(chip, Some(tod(0, 0, 19, 17)));
         assert_eq!(flags, 3);
         assert_eq!(data[0], 0x02, "ACL should have H4 type 0x02");
     }
@@ -400,71 +567,214 @@ mod tests {
     #[test]
     fn test_btsnoop_epoch_offset() {
         let offset = btsnoop_epoch_offset_usec();
-        // Roughly 1970 years in microseconds
         assert!(offset > 62_000_000_000_000_000);
         assert!(offset < 63_000_000_000_000_000);
     }
 
     #[test]
     fn test_parse_no_ts_packet() {
-        // No timestamp at all → valid packet, ts = None (caller carries forward).
         let line = "CMD => 03 0c 00";
         let result = parse_hci_line(line);
         assert!(result.is_some());
-        let (ts, flags, data) = result.unwrap();
-        assert!(ts.is_none(), "no-ts line should yield None timestamp");
+        let (pc, chip, flags, data) = result.unwrap();
+        assert!(pc.is_none());
+        assert!(chip.is_none());
         assert_eq!(flags, 0);
         assert_eq!(&data, &[0x01, 0x03, 0x0c, 0x00]);
     }
 
     #[test]
     fn test_parse_pc_ts_only() {
-        // PC timestamp but no chip [..] timestamp → previously dropped, now uses PC ts.
         let line = "(15:20:52.807) CMD => 03 0c 00";
         let result = parse_hci_line(line);
         assert!(result.is_some());
-        let (ts, flags, data) = result.unwrap();
-        assert!(ts.is_some(), "PC-ts-only line should yield Some timestamp");
+        let (pc, chip, flags, data) = result.unwrap();
+        assert_eq!(pc, Some(tod(15, 20, 52, 807)));
+        assert!(chip.is_none());
         assert_eq!(flags, 0);
         assert_eq!(&data, &[0x01, 0x03, 0x0c, 0x00]);
     }
 
     #[test]
     fn test_extract_carry_forward() {
-        // Line 2 has no timestamp; it should inherit line 1's timestamp and still
-        // produce a packet (previously it was dropped).
         let dir = std::env::temp_dir();
         let path = dir.join("logzilla_carry_fwd_test.txt");
         let content = "[00:00:00.107] CMD => 03 0c 00\nCMD => 04 0c 00\n";
         std::fs::write(&path, content).unwrap();
-        let result = extract_hci(path.to_str().unwrap().to_string());
+        let result = extract_hci(path.to_str().unwrap().to_string(), Some(8));
         let _ = std::fs::remove_file(path.with_extension("cfa"));
         let _ = std::fs::remove_file(&path);
         assert!(result.is_ok(), "extract_hci failed: {:?}", result.err());
         let msg = result.unwrap();
         assert!(
             msg.contains("2 个 HCI 数据包"),
-            "expected 2 packets (carry-forward), got: {}", msg
+            "expected 2 packets (carry-forward), got: {}",
+            msg
         );
     }
 
     #[test]
     fn test_extract_gbk_lossy() {
-        // 0x81 0x40 is invalid UTF-8 (simulates GBK). Old read_to_string would fail
-        // the whole read; lossy decode lets the ASCII HCI line parse.
         let dir = std::env::temp_dir();
         let path = dir.join("logzilla_gbk_lossy_test.txt");
         let mut bytes: Vec<u8> = vec![0x81, 0x40, 0x0A];
         bytes.extend_from_slice(b"[00:00:00.107] CMD => 03 0c 00\n");
         std::fs::write(&path, &bytes).unwrap();
-        let result = extract_hci(path.to_str().unwrap().to_string());
+        let result = extract_hci(path.to_str().unwrap().to_string(), Some(8));
         let _ = std::fs::remove_file(path.with_extension("cfa"));
         let _ = std::fs::remove_file(&path);
-        assert!(result.is_ok(), "GBK-ish file should not fail read: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "GBK-ish file should not fail read: {:?}",
+            result.err()
+        );
         let msg = result.unwrap();
         assert!(
             msg.contains("1 个 HCI 数据包"),
-            "expected 1 packet from lossy-decoded GBK file, got: {}", msg
+            "expected 1 packet from lossy-decoded GBK file, got: {}",
+            msg
         );
+    }
+
+    #[test]
+    fn test_resolve_uses_non_hci_pc_then_chip_delta() {
+        // Real log shape from 20260713-172213-395.txt:
+        // (17:20:54.438) [00:00:03.404] MSG ...   ← not HCI, but has PC
+        // [00:00:03.411] CMD => 03 0c 00           ← HCI reset, chip-only
+        // Expect wall-clock ≈ 17:20:54.445 (PC + 7ms chip delta)
+        let mut state = TimestampState::new();
+        state.observe_pc(tod(17, 20, 54, 438), Some(tod(0, 0, 3, 404)));
+
+        let reset = state
+            .resolve_hci(None, Some(tod(0, 0, 3, 411)))
+            .expect("should resolve");
+        assert_eq!(reset, tod(17, 20, 54, 445));
+
+        // Next chip-only line continues relative to same PC anchor.
+        let next = state
+            .resolve_hci(None, Some(tod(0, 0, 3, 433)))
+            .expect("should resolve");
+        assert_eq!(next, tod(17, 20, 54, 467));
+    }
+
+    #[test]
+    fn test_resolve_prefers_hci_pc_over_chip() {
+        let mut state = TimestampState::new();
+        let t = state
+            .resolve_hci(Some(tod(15, 20, 52, 807)), Some(tod(0, 0, 19, 17)))
+            .unwrap();
+        assert_eq!(t, tod(15, 20, 52, 807));
+
+        // Chip-only after PC: advance by chip delta from anchor.
+        let t2 = state
+            .resolve_hci(None, Some(tod(0, 0, 19, 50)))
+            .unwrap();
+        // base PC 15:20:52.807 at chip 19.017; chip 19.050 → +33ms
+        assert_eq!(t2, tod(15, 20, 52, 840));
+    }
+
+    #[test]
+    fn test_wall_clock_converts_log_tz_to_true_utc() {
+        // Log wall clock 17:20:54.438 in UTC+8 must store absolute UTC 09:20:54.438
+        // so Frontline (UTC+8 viewer) shows 17:20:54 again.
+        let ts = wall_clock_to_btsnoop(tod(17, 20, 54, 438), 8);
+        let unix_usec = ts - btsnoop_epoch_offset_usec();
+        let dt = chrono::DateTime::from_timestamp_micros(unix_usec as i64)
+            .expect("valid unix usec");
+        let utc = dt.naive_utc();
+        assert_eq!(utc.time().hour(), 9);
+        assert_eq!(utc.time().minute(), 20);
+        assert_eq!(utc.time().second(), 54);
+        assert_eq!(utc.time().nanosecond() / 1_000_000, 438);
+
+        // log_tz=0: preserve digits for WPS UTC0 viewers.
+        let ts0 = wall_clock_to_btsnoop(tod(17, 20, 54, 438), 0);
+        let unix0 = ts0 - btsnoop_epoch_offset_usec();
+        let n0 = chrono::DateTime::from_timestamp_micros(unix0 as i64)
+            .unwrap()
+            .naive_utc();
+        assert_eq!(n0.time().hour(), 17);
+        assert_eq!(n0.time().minute(), 20);
+        assert_eq!(n0.time().second(), 54);
+        assert_eq!(n0.time().nanosecond() / 1_000_000, 438);
+
+        // Delta between tz0 and tz8 for same wall clock is exactly 8 hours.
+        assert_eq!(
+            (ts0 as i64) - (ts as i64),
+            8 * 3600 * 1_000_000
+        );
+    }
+
+    #[test]
+    fn test_extract_from_user_scenario_non_hci_pc() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("logzilla_user_scenario_pc_msg.txt");
+        let content = "\
+(17:20:54.388) sys_init  dcin :0
+(17:20:54.438) [00:00:03.404] MSG <- 60 01 01
+[00:00:03.411] CMD => 03 0c 00
+[00:00:03.433] EVT <= 0e 04 05 03 0c 00
+(17:20:55.099) [00:00:04.066] CMD => 17 20 20 01 02 03 04
+";
+        std::fs::write(&path, content).unwrap();
+        let result = extract_hci(path.to_str().unwrap().to_string(), Some(8));
+        assert!(result.is_ok(), "extract_hci failed: {:?}", result.err());
+
+        let cfa_path = path.with_extension("cfa");
+        let data = std::fs::read(&cfa_path).expect("Failed to read CFA");
+        let _ = std::fs::remove_file(&cfa_path);
+        let _ = std::fs::remove_file(&path);
+
+        assert!(data.len() > 16);
+        let mut ts0 = [0u8; 8];
+        ts0.copy_from_slice(&data[32..40]);
+        let t0 = u64::from_be_bytes(ts0) - btsnoop_epoch_offset_usec();
+        let dt0 = chrono::DateTime::from_timestamp_micros(t0 as i64).unwrap();
+        let n0 = dt0.naive_utc();
+        // Wall 17:20:54.445 @ UTC+8 → stored UTC 09:20:54.445
+        assert_eq!(n0.time().hour(), 9);
+        assert_eq!(n0.time().minute(), 20);
+        assert_eq!(n0.time().second(), 54);
+        assert_eq!(n0.time().nanosecond() / 1_000_000, 445);
+
+        // Third packet PC 17:20:55.099 @ UTC+8 → UTC 09:20:55.099
+        let mut ts2 = [0u8; 8];
+        ts2.copy_from_slice(&data[91..99]);
+        let t2 = u64::from_be_bytes(ts2) - btsnoop_epoch_offset_usec();
+        let dt2 = chrono::DateTime::from_timestamp_micros(t2 as i64).unwrap();
+        let n2 = dt2.naive_utc();
+        assert_eq!(n2.time().hour(), 9);
+        assert_eq!(n2.time().minute(), 20);
+        assert_eq!(n2.time().second(), 55);
+        assert_eq!(n2.time().nanosecond() / 1_000_000, 99);
+    }
+
+    #[test]
+    fn test_extract_real_user_file_if_present() {
+        let path = PathBuf::from(r"D:\log\07_13\bt_t1t2\20260713-172213-395.txt");
+        if !path.exists() {
+            eprintln!("user sample not present, skip");
+            return;
+        }
+        let result = extract_hci(path.to_str().unwrap().to_string(), Some(8));
+        assert!(result.is_ok(), "extract_hci failed: {:?}", result.err());
+        let cfa = path.with_extension("cfa");
+        let data = std::fs::read(&cfa).expect("read cfa");
+        let mut ts0 = [0u8; 8];
+        ts0.copy_from_slice(&data[32..40]);
+        let t0 = u64::from_be_bytes(ts0) - btsnoop_epoch_offset_usec();
+        let n0 = chrono::DateTime::from_timestamp_micros(t0 as i64)
+            .unwrap()
+            .naive_utc();
+        // Wall ~17:20:54.xxx @ UTC+8 → stored UTC ~09:20:54
+        assert_eq!(
+            n0.time().hour(),
+            9,
+            "first HCI must be true UTC of PC wall clock, got {:?}",
+            n0
+        );
+        assert_eq!(n0.time().minute(), 20);
+        assert_eq!(n0.time().second(), 54);
+        let _ = std::fs::remove_file(&cfa);
     }
 }

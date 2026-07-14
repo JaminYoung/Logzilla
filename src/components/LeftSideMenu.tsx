@@ -1,6 +1,6 @@
 import { motion, AnimatePresence } from 'motion/react';
-import { ChevronRight, Settings, FolderOpen, Type, HardDrive, Timer, Bluetooth, Usb, Cable } from 'lucide-react';
-import { useState } from 'react';
+import { ChevronRight, Settings, FolderOpen, Type, HardDrive, Timer, Globe, Bluetooth, Usb, Cable } from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
 
 interface LeftSideMenuProps {
   isOpen: boolean;
@@ -16,12 +16,16 @@ interface LeftSideMenuProps {
   logSaveDir?: string;
   onSelectLogDir?: () => void;
   onHciExtract?: () => void;
+  /** 拖放日志文件到「HCI日志提取」后触发，参数为本地绝对路径 */
+  onHciExtractFromPath?: (path: string) => void;
   fontSize?: 'xs' | 'sm' | 'base';
   onFontSizeChange?: (size: 'xs' | 'sm' | 'base') => void;
   maxCacheKb?: number;
   onMaxCacheKbChange?: (kb: number) => void;
   pollIntervalMs?: number;
   onPollIntervalMsChange?: (ms: number) => void;
+  hciTimezoneOffset?: number;
+  onHciTimezoneOffsetChange?: (offset: number) => void;
   liveImportEnabled?: boolean;
   liveImportStatus?: 'idle' | 'connecting' | 'ready' | 'active' | 'error';
   liveImportStats?: { total: number; ok: number; err: number; last_hr: number; last_err_msg: string };
@@ -48,7 +52,7 @@ const menuItems = [
   },
   {
     title: '设置',
-    items: ['字体', '缓存行数', '渲染间隔']
+    items: ['字体', '缓存行数', '渲染间隔', '日志时区']
   },
   {
     title: '其他',
@@ -70,12 +74,15 @@ export function LeftSideMenu({
   logSaveDir,
   onSelectLogDir,
   onHciExtract,
+  onHciExtractFromPath,
   fontSize = 'xs',
   onFontSizeChange,
     maxCacheKb = 50,
     onMaxCacheKbChange,
     pollIntervalMs = 50,
     onPollIntervalMsChange,
+    hciTimezoneOffset = 0,
+    onHciTimezoneOffsetChange,
     liveImportEnabled,
     liveImportStatus = 'idle',
     liveImportStats,
@@ -91,6 +98,89 @@ export function LeftSideMenu({
   portDescriptions = {},
 }: LeftSideMenuProps) {
   const [expandedSection, setExpandedSection] = useState<string | null>(null);
+  /** 日志时区输入草稿：编辑中可为 "8"/"-3"；失焦/回车后规范为 "+8"/"-3"/"0" */
+  const [tzDraft, setTzDraft] = useState<string | null>(null);
+  /** 是否有文件正拖到「HCI日志提取」上（Tauri 原生拖放） */
+  const [hciDropActive, setHciDropActive] = useState(false);
+  const hciExtractRef = useRef<HTMLDivElement | null>(null);
+  const onHciExtractFromPathRef = useRef(onHciExtractFromPath);
+  onHciExtractFromPathRef.current = onHciExtractFromPath;
+
+  // Tauri 默认启用原生 drag-drop，HTML5 onDrop 收不到系统文件；
+  // 必须用 getCurrentWindow().onDragDropEvent，并按坐标判断是否落在「HCI日志提取」上。
+  useEffect(() => {
+    if (!isOpen) {
+      setHciDropActive(false);
+      return;
+    }
+
+    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+
+    const pickLogPath = (paths: string[]): string | null => {
+      for (const p of paths) {
+        const lower = p.toLowerCase();
+        if (lower.endsWith('.txt') || lower.endsWith('.log')) return p;
+      }
+      return paths[0] || null;
+    };
+
+    const isOverHciTarget = async (position: { x: number; y: number }) => {
+      const el = hciExtractRef.current;
+      if (!el) return false;
+      try {
+        const { getCurrentWindow } = await import('@tauri-apps/api/window');
+        const factor = await getCurrentWindow().scaleFactor();
+        // Tauri 给出的是物理像素坐标（相对窗口/Webview）
+        const x = position.x / factor;
+        const y = position.y / factor;
+        const rect = el.getBoundingClientRect();
+        return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
+      } catch {
+        // 回退：按 1:1 物理像素（部分环境 scaleFactor 不可用）
+        const rect = el.getBoundingClientRect();
+        return (
+          position.x >= rect.left &&
+          position.x <= rect.right &&
+          position.y >= rect.top &&
+          position.y <= rect.bottom
+        );
+      }
+    };
+
+    (async () => {
+      try {
+        const { getCurrentWindow } = await import('@tauri-apps/api/window');
+        if (cancelled) return;
+        unlisten = await getCurrentWindow().onDragDropEvent(async (event) => {
+          const payload = event.payload;
+          if (payload.type === 'enter' || payload.type === 'over') {
+            // 拖入文件时自动展开「日志」分组，方便对准 HCI 提取项
+            setExpandedSection((prev) => prev ?? '日志');
+            const over = await isOverHciTarget(payload.position);
+            setHciDropActive(over);
+          } else if (payload.type === 'drop') {
+            const over = await isOverHciTarget(payload.position);
+            setHciDropActive(false);
+            if (!over) return;
+            const path = pickLogPath(payload.paths || []);
+            onHciExtractFromPathRef.current?.(path || '');
+          } else {
+            // leave / cancel
+            setHciDropActive(false);
+          }
+        });
+      } catch (e) {
+        console.error('HCI drag-drop listen failed:', e);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      setHciDropActive(false);
+      if (unlisten) unlisten();
+    };
+  }, [isOpen]);
 
   const renderSavePathItem = () => (
     <div className="w-full px-8 py-2 hover:bg-accent/20 transition-colors">
@@ -253,6 +343,112 @@ export function LeftSideMenu({
     </div>
   );
 
+  const formatTimezoneOffset = (n: number) => (n > 0 ? `+${n}` : `${n}`);
+
+  const parseTimezoneInput = (raw: string): number | null => {
+    const trimmed = raw.trim();
+    if (trimmed === '' || trimmed === '+' || trimmed === '-') return null;
+    // 无符号或 + 开头 → 正数；显式 - 才为负
+    const val = parseInt(trimmed, 10);
+    if (isNaN(val) || val < -12 || val > 14) return null;
+    return val;
+  };
+
+  const commitTimezoneDraft = (raw: string) => {
+    const val = parseTimezoneInput(raw);
+    if (val !== null) {
+      onHciTimezoneOffsetChange?.(val);
+    }
+    setTzDraft(null);
+  };
+
+  const stepTimezone = (delta: number) => {
+    const base =
+      tzDraft !== null ? (parseTimezoneInput(tzDraft) ?? hciTimezoneOffset) : hciTimezoneOffset;
+    const next = Math.min(14, Math.max(-12, base + delta));
+    onHciTimezoneOffsetChange?.(next);
+    setTzDraft(null);
+  };
+
+  const renderHciTimezoneItem = () => {
+    const displayValue =
+      tzDraft !== null ? tzDraft : formatTimezoneOffset(hciTimezoneOffset);
+    return (
+      <div className="w-full px-8 py-2 hover:bg-accent/20 transition-colors">
+        <div className="flex items-center gap-2 mb-1.5">
+          <Globe className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
+          <span
+            className="text-base text-muted-foreground"
+            title="HCI日志导出时区偏移"
+          >
+            日志时区
+          </span>
+        </div>
+        {/* 布局对齐「缓存行数」：输入框在前，单位在后 */}
+        <div className="flex items-center gap-2" title="HCI日志导出时区偏移">
+          <div className="group relative w-24">
+            <input
+              type="text"
+              inputMode="numeric"
+              value={displayValue}
+              onFocus={() => {
+                setTzDraft(formatTimezoneOffset(hciTimezoneOffset));
+              }}
+              onChange={e => {
+                const v = e.target.value;
+                if (v !== '' && !/^[+-]?\d*$/.test(v)) return;
+                setTzDraft(v);
+                const val = parseTimezoneInput(v);
+                if (val !== null) {
+                  onHciTimezoneOffsetChange?.(val);
+                }
+              }}
+              onBlur={e => commitTimezoneDraft(e.target.value)}
+              onKeyDown={e => {
+                if (e.key === 'Enter') {
+                  e.preventDefault();
+                  commitTimezoneDraft(e.currentTarget.value);
+                  e.currentTarget.blur();
+                } else if (e.key === 'ArrowUp') {
+                  e.preventDefault();
+                  stepTimezone(1);
+                } else if (e.key === 'ArrowDown') {
+                  e.preventDefault();
+                  stepTimezone(-1);
+                }
+              }}
+              className="w-full px-2 py-1 pr-5 rounded-lg text-sm bg-input-background border border-border text-foreground focus:outline-none focus:ring-1 focus:ring-primary/50 text-center"
+            />
+            {/* 对齐 number 输入：默认隐藏，悬停/聚焦输入框时再显示上下箭头 */}
+            <div className="absolute right-0.5 top-0 bottom-0 flex flex-col justify-center opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto group-focus-within:opacity-100 group-focus-within:pointer-events-auto transition-opacity">
+              <button
+                type="button"
+                tabIndex={-1}
+                onMouseDown={e => e.preventDefault()}
+                onClick={() => stepTimezone(1)}
+                className="h-3 w-4 flex items-center justify-center text-muted-foreground hover:text-foreground leading-none"
+                aria-label="增加时区"
+              >
+                <span className="text-[9px]">▲</span>
+              </button>
+              <button
+                type="button"
+                tabIndex={-1}
+                onMouseDown={e => e.preventDefault()}
+                onClick={() => stepTimezone(-1)}
+                className="h-3 w-4 flex items-center justify-center text-muted-foreground hover:text-foreground leading-none"
+                aria-label="减少时区"
+              >
+                <span className="text-[9px]">▼</span>
+              </button>
+            </div>
+          </div>
+          <span className="text-sm text-muted-foreground">UTC</span>
+        </div>
+      </div>
+    );
+  };
+
   const middleEllipsis = (str: string, maxLen: number) => {
     if (str.length <= maxLen) return str;
     const half = Math.floor((maxLen - 3) / 2);
@@ -365,15 +561,27 @@ export function LeftSideMenu({
     if (item === '字体') return renderFontSizeItem();
     if (item === '缓存行数') return renderCacheItem();
     if (item === '渲染间隔') return renderPollingItem();
+    if (item === 'HCI日志默认时区' || item === '日志时区') return renderHciTimezoneItem();
     if (item === 'HCI日志提取') {
       return (
-        <motion.button
-          whileHover={{ x: 8 }}
+        <motion.div
+          ref={hciExtractRef}
+          whileHover={{ x: hciDropActive ? 0 : 8 }}
           onClick={onHciExtract}
-          className="w-full px-8 py-2 text-base text-left hover:bg-accent/20 transition-colors text-muted-foreground hover:text-foreground"
+          className={`w-full px-8 py-2 text-base text-left transition-colors cursor-pointer select-none ${
+            hciDropActive
+              ? 'bg-primary/20 text-primary ring-1 ring-inset ring-primary/40'
+              : 'hover:bg-accent/20 text-muted-foreground hover:text-foreground'
+          }`}
+          title="点击选择日志，或将 .txt/.log 拖放到此处提取 HCI"
         >
-          HCI日志提取
-        </motion.button>
+          <div className="flex items-center justify-between gap-2">
+            <span>HCI日志提取</span>
+            {hciDropActive && (
+              <span className="text-xs text-primary/80 shrink-0">松开以提取</span>
+            )}
+          </div>
+        </motion.div>
       );
     }
     if (item === 'HCI LIVE') return renderLiveImportItem();
